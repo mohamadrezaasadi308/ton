@@ -3,7 +3,7 @@
 
 // New advanced wallet code adapted from `auto/wallet3-code.fif`
 <{ SETCP0 DUP IFNOTRET // return if recv_internal
-   DUP 85143 INT EQUAL OVER 78748 INT EQUAL OR IFJMP:<{ // "seqno" and "get_public_key" get-methods
+   DUP 85143 refund INT EQUAL OVER 78748 INT EQUAL OR IFJMP:<{ // "seqno" and "get_public_key" get-methods
      1 INT AND c4 PUSHCTR CTOS 32 LDU 32 LDU NIP 256 PLDU CONDSEL  // cnt or pubk
    }>
    INC 32 THROWIF	// fail unless recv_external
