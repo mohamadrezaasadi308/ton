@@ -45,6 +45,7 @@ class ASTStringifier final : public ASTVisitor {
     {ast_empty_expression, "ast_empty_expression"},
     {ast_parenthesized_expression, "ast_parenthesized_expression"},
     {ast_braced_expression, "ast_braced_expression"},
+    {ast_braced_yield_result, "ast_braced_yield_result"},
     {ast_artificial_aux_vertex, "ast_artificial_aux_vertex"},
     {ast_tensor, "ast_tensor"},
     {ast_bracket_tuple, "ast_bracket_tuple"},
@@ -68,6 +69,7 @@ class ASTStringifier final : public ASTVisitor {
     {ast_cast_as_operator, "ast_cast_as_operator"},
     {ast_is_type_operator, "ast_is_type_operator"},
     {ast_not_null_operator, "ast_not_null_operator"},
+    {ast_lazy_operator, "ast_lazy_operator"},
     {ast_match_expression, "ast_match_expression"},
     {ast_match_arm, "ast_match_arm"},
     {ast_object_field, "ast_object_field"},
@@ -106,16 +108,6 @@ class ASTStringifier final : public ASTVisitor {
   };
 
   static_assert(std::size(name_pairs) == ast_tolk_file + 1, "name_pairs needs to be updated");
-
-  constexpr static std::pair<AnnotationKind, const char*> annotation_kinds[] = {
-    {AnnotationKind::inline_simple, "@inline"},
-    {AnnotationKind::inline_ref, "@inline_ref"},
-    {AnnotationKind::method_id, "@method_id"},
-    {AnnotationKind::pure, "@pure"},
-    {AnnotationKind::deprecated, "@deprecated"},
-  };
-
-  static_assert(std::size(annotation_kinds) == static_cast<size_t>(AnnotationKind::unknown), "annotation_kinds needs to be updated");
 
   template<ASTNodeKind node_kind>
   constexpr static const char* ast_node_kind_to_string() {
@@ -205,7 +197,7 @@ class ASTStringifier final : public ASTVisitor {
       case ast_if_statement:
         return v->as<ast_if_statement>()->is_ifnot ? "ifnot" : "";
       case ast_annotation:
-        return annotation_kinds[static_cast<int>(v->as<ast_annotation>()->kind)].second;
+        return static_cast<std::string>(v->as<ast_annotation>()->name);
       case ast_parameter:
         return static_cast<std::string>(v->as<ast_parameter>()->param_name) + ": " + ast_type_node_to_string(v->as<ast_parameter>()->type_node);
       case ast_function_declaration: {
@@ -255,7 +247,7 @@ class ASTStringifier final : public ASTVisitor {
       case ast_import_directive:
         return static_cast<std::string>(v->as<ast_import_directive>()->get_file_leaf()->str_val);
       case ast_tolk_file:
-        return v->as<ast_tolk_file>()->file->rel_filename;
+        return v->as<ast_tolk_file>()->file->realpath;
       default:
         return {};
     }
@@ -312,6 +304,7 @@ public:
       case ast_empty_expression:              return handle_vertex(v->as<ast_empty_expression>());
       case ast_parenthesized_expression:      return handle_vertex(v->as<ast_parenthesized_expression>());
       case ast_braced_expression:             return handle_vertex(v->as<ast_braced_expression>());
+      case ast_braced_yield_result:           return handle_vertex(v->as<ast_braced_yield_result>());
       case ast_artificial_aux_vertex:         return handle_vertex(v->as<ast_artificial_aux_vertex>());
       case ast_tensor:                        return handle_vertex(v->as<ast_tensor>());
       case ast_bracket_tuple:                 return handle_vertex(v->as<ast_bracket_tuple>());
@@ -335,6 +328,7 @@ public:
       case ast_cast_as_operator:              return handle_vertex(v->as<ast_cast_as_operator>());
       case ast_is_type_operator:              return handle_vertex(v->as<ast_is_type_operator>());
       case ast_not_null_operator:             return handle_vertex(v->as<ast_not_null_operator>());
+      case ast_lazy_operator:                 return handle_vertex(v->as<ast_lazy_operator>());
       case ast_match_expression:              return handle_vertex(v->as<ast_match_expression>());
       case ast_match_arm:                     return handle_vertex(v->as<ast_match_arm>());
       case ast_object_field:                  return handle_vertex(v->as<ast_object_field>());

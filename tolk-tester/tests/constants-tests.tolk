@@ -1,8 +1,8 @@
-type MInt = int;
-type MSlice = slice;
+type MInt = int
+type MSlice = slice
 
-const int1 = 1;
-const int2 = 2;
+const int1 = 1
+const int2 = 2
 
 const int101: int = 101;
 const int111: MInt = 111;
@@ -22,9 +22,10 @@ const nibbles: int = 4;
 const strange_zero = (!10 as int);
 const strange_minus_1: MInt = (!0 as int);
 
-const true1 = true;
-const true2 = !!true;
-const true3 = true1 && true2;
+const addr1 = address("Ef8zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM0vF");
+
+// since `;` is not mandatory, this is correct from a syntax point of view
+const true1 = true const true2 = !!true const true3 = true1 && true2
 
 const false1 = !true;
 const false2 = false1 || false;
@@ -88,6 +89,12 @@ fun test5() {
     return (intOrN == null, int32Or64 is int32, int32Or64);
 }
 
+@method_id(106)
+fun test6() {
+    __expect_type(addr1, "address");
+    return (addr1 == addr1, addr1 != addr1, addr1 == createAddressNone(), addr1.getWorkchain());
+}
+
 fun main() {
     var i1: int = iget1();
     var i2: int = iget2();
@@ -117,6 +124,7 @@ fun main() {
 @testcase | 103 |   | 0 0
 @testcase | 104 |   | 1 1 2
 @testcase | 105 |   | -1 0 7 48
+@testcase | 106 |   | -1 0 0 -1
 
-@code_hash 49556957179018386976033482229516007597784982050169632168468608374010225644988
+@code_hash 32362412747322136329528616455651783746542516198110452861733590440068294458753
 */

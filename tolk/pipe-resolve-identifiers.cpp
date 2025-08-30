@@ -64,22 +64,6 @@ static void fire_error_type_used_as_symbol(FunctionPtr cur_f, V<ast_identifier> 
   }
 }
 
-static void check_import_exists_when_using_sym(FunctionPtr cur_f, AnyV v_usage, const Symbol* used_sym) {
-  SrcLocation sym_loc = used_sym->loc;
-  if (!v_usage->loc.is_symbol_from_same_or_builtin_file(sym_loc)) {
-    const SrcFile* declared_in = sym_loc.get_src_file();
-    bool has_import = false;
-    for (const SrcFile::ImportDirective& import : v_usage->loc.get_src_file()->imports) {
-      if (import.imported_file == declared_in) {
-        has_import = true;
-      }
-    }
-    if (!has_import) {
-      throw ParseError(cur_f, v_usage->loc, "Using a non-imported symbol `" + used_sym->name + "`. Forgot to import \"" + declared_in->rel_filename + "\"?");
-    }
-  }
-}
-
 struct NameAndScopeResolver {
   std::vector<std::unordered_map<uint64_t, const Symbol*>> scopes;
 
@@ -132,15 +116,15 @@ class AssignSymInsideFunctionVisitor final : public ASTVisitorFunctionBody {
   static NameAndScopeResolver current_scope;
   static FunctionPtr cur_f;
 
-  static LocalVarPtr create_local_var_sym(std::string_view name, SrcLocation loc, AnyTypeV declared_type_node, bool immutable) {
-    LocalVarData* v_sym = new LocalVarData(static_cast<std::string>(name), loc, declared_type_node, immutable * LocalVarData::flagImmutable, -1);
+  static LocalVarPtr create_local_var_sym(std::string_view name, SrcLocation loc, AnyTypeV declared_type_node, bool immutable, bool lateinit) {
+    LocalVarData* v_sym = new LocalVarData(static_cast<std::string>(name), loc, declared_type_node, nullptr, immutable * LocalVarData::flagImmutable + lateinit * LocalVarData::flagLateInit, -1);
     current_scope.add_local_var(v_sym);
     return v_sym;
   }
 
   static void process_catch_variable(AnyExprV catch_var) {
     if (auto v_ref = catch_var->try_as<ast_reference>()) {
-      LocalVarPtr var_ref = create_local_var_sym(v_ref->get_name(), catch_var->loc, nullptr, true);
+      LocalVarPtr var_ref = create_local_var_sym(v_ref->get_name(), catch_var->loc, nullptr, true, false);
       v_ref->mutate()->assign_sym(var_ref);
     }
   }
@@ -158,7 +142,7 @@ protected:
       }
       v->mutate()->assign_var_ref(var_ref);
     } else {
-      LocalVarPtr var_ref = create_local_var_sym(v->get_name(), v->loc, v->type_node, v->is_immutable);
+      LocalVarPtr var_ref = create_local_var_sym(v->get_name(), v->loc, v->type_node, v->is_immutable, v->is_lateinit);
       v->mutate()->assign_var_ref(var_ref);
     }
   }
@@ -180,7 +164,9 @@ protected:
 
     // for global functions, global vars and constants, `import` must exist
     if (!sym->try_as<LocalVarPtr>()) {
-      check_import_exists_when_using_sym(cur_f, v, sym);
+      if (!v->loc.is_symbol_from_same_or_builtin_file(sym->loc)) {
+        sym->check_import_exists_when_used_from(cur_f, v->loc);
+      }
     }
   }
 
@@ -211,7 +197,7 @@ protected:
 
   void visit(V<ast_match_arm> v) override {
     // resolve identifiers after => at first
-    parent::visit(v->get_body());
+    visit(v->get_body());
     // because handling lhs of => is comprehensive
 
     switch (v->pattern_kind) {
@@ -274,7 +260,11 @@ public:
     auto v_block = v->get_body()->as<ast_block_statement>();
     current_scope.open_scope(v->loc);
     for (int i = 0; i < fun_ref->get_num_params(); ++i) {
-      current_scope.add_local_var(&fun_ref->parameters[i]);
+      LocalVarPtr param_ref = &fun_ref->parameters[i];
+      current_scope.add_local_var(param_ref);
+      if (param_ref->has_default_value()) {
+        parent::visit(param_ref->default_value);
+      }
     }
     parent::visit(v_block);
     current_scope.close_scope(v_block->loc_end);

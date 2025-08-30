@@ -1,5 +1,5 @@
 fun extractFromTypedTuple(params: [int]) {
-    var [payload: int] = params;
+    var [payload: int, ] = params;
     return payload + 10;
 }
 
@@ -111,7 +111,7 @@ global t107: (int, int);
 
 @method_id(107)
 fun test107() {
-    ((t107 = (1, 2)).0, (t107 = (3, 4)).1) = (5, 6);
+    ((t107 = (1, 2)).0, (t107 = (3, 4)).1, ) = (5, 6, );
     return t107;
 }
 
@@ -168,7 +168,7 @@ fun test112() {
 
 @method_id(113)
 fun test113() {
-    var (a, t, z) = (1, [2,3], (-1,-1));
+    var (a, t, z, ) = (1, [2,3], (-1,-1));
     (a, t, a, z, t.1, z.1) = (10, [a,12], 13, (a, t.1), 14, t.1);
     return (a, t, z);
 }
@@ -212,10 +212,55 @@ fun test117() {
     return c;
 }
 
+struct Storage {
+    owner: slice;
+}
+
+@method_id(118)
+fun test118(x: int) {
+    var i1: int;
+    if (10 > 3) {
+        i1 = 10;
+    } else { { (_, i1) = (5, 20); } }
+
+    var i2: int10;
+    match (x) {
+        1 => i2 = 1,
+        2 => i2 = 2,
+        3 => i2 = 3,
+        else => i2 = 4,
+    }
+
+    var st: Storage?;
+    if (x > 100) {
+        throw 123;
+    } else {
+        if (x < -100) { throw 456; }
+        else { st = { owner: "" }}
+    }
+
+    var i3: (int, int) | builder;
+    match (i1) {
+        int => i3 = (1, 2),
+    }
+
+    var unused: int8;
+
+    return (i1, i2, st.owner.remainingBitsCount(), i3.0);
+}
+
+@method_id(119)
+fun test119(a: int, b: int) {
+    var t: tuple = [a + 1, b * 2] as tuple;
+    val l = t.size();
+    val [c,d:int] = [t.0 as int, t.1];
+    return (l, c, d);
+}
+
 
 
 fun main(value: int, ) {
-    var (x: int?, y) = (autoInferIntNull(value), autoInferIntNull(value * 2));
+    var (x: int?, y,) = (autoInferIntNull(value), autoInferIntNull(value * 2));
     if (x == null && y == null) { return null; }
     return x == null || y == null ? -1 : x! + y!;
 }
@@ -241,11 +286,13 @@ fun main(value: int, ) {
 @testcase | 115 |        | [ 101 111 ] 9 9
 @testcase | 116 |        | 1 2 3 4 [ 1 2 3 4 ]
 @testcase | 117 |        | [ 20 ]
+@testcase | 118 | 3      | 10 3 0 1
+@testcase | 119 | 1 2    | 2 2 4
 
 
 @fif_codegen
 """
-  test116 PROC:<{   //
+  test116() PROC:<{ //
     1 PUSHINT	    //  '10=1
     2 PUSHINT	    //  '10=1 '11=2
     3 PUSHINT	    //  '10=1 '11=2 '12=3

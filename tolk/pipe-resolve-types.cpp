@@ -47,6 +47,9 @@ namespace tolk {
  * Example: `type A<T> = Ok<T>`, then `Ok<T>` is not ready yet, it's left as TypeDataGenericTypeWithTs.
  */
 
+static std::unordered_map<StructPtr, bool> visited_structs;
+static std::unordered_map<AliasDefPtr, bool> visited_aliases;
+
 GNU_ATTRIBUTE_NORETURN GNU_ATTRIBUTE_COLD
 static void fire_error_unknown_type_name(FunctionPtr cur_f, SrcLocation loc, std::string_view text) {
   if (text == "auto") {
@@ -68,24 +71,24 @@ static void fire_error_generic_type_used_without_T(FunctionPtr cur_f, SrcLocatio
   fire(cur_f, loc, "type `" + type_name_with_Ts + "` is generic, you should provide type arguments");
 }
 
-static TypePtr parse_intN(std::string_view strN, bool is_unsigned) {
+static TypePtr parse_intN_uintN(std::string_view strN, bool is_unsigned) {
   int n;
-  auto result = std::from_chars(strN.data() + 3 + static_cast<int>(is_unsigned), strN.data() + strN.size(), n);
+  auto result = std::from_chars(strN.data(), strN.data() + strN.size(), n);
   bool parsed = result.ec == std::errc() && result.ptr == strN.data() + strN.size();
-  if (!parsed || n <= 0 || n > 256 + static_cast<int>(is_unsigned)) {
+  if (!parsed || n <= 0 || n > 257 - static_cast<int>(is_unsigned)) {
     return nullptr;   // `int1000`, maybe it's user-defined alias, let it be unresolved
   }
-  return TypeDataIntN::create(is_unsigned, false, n);
+  return TypeDataIntN::create(n, is_unsigned, false);
 }
 
-static TypePtr parse_bytesN(std::string_view strN, bool is_bits) {
+static TypePtr parse_bytesN_bitsN(std::string_view strN, bool is_bits) {
   int n;
-  auto result = std::from_chars(strN.data() + 5  - static_cast<int>(is_bits), strN.data() + strN.size(), n);
+  auto result = std::from_chars(strN.data(), strN.data() + strN.size(), n);
   bool parsed = result.ec == std::errc() && result.ptr == strN.data() + strN.size();
   if (!parsed || n <= 0 || n > 1024) {
     return nullptr;   // `bytes9999`, maybe it's user-defined alias, let it be unresolved
   }
-  return TypeDataBytesN::create(is_bits, n);
+  return TypeDataBitsN::create(n, is_bits);
 }
 
 static TypePtr try_parse_predefined_type(std::string_view str) {
@@ -107,10 +110,15 @@ static TypePtr try_parse_predefined_type(std::string_view str) {
       break;
     case 7:
       if (str == "builder") return TypeDataBuilder::create();
+      if (str == "address") return TypeDataAddress::create();
       break;
     case 8:
-      if (str == "varint16") return TypeDataIntN::create(false, true, 16);
-      if (str == "varint32") return TypeDataIntN::create(false, true, 32);
+      if (str == "varint16") return TypeDataIntN::create(16, false, true);
+      if (str == "varint32") return TypeDataIntN::create(32, false, true);
+      break;
+    case 9:
+      if (str == "varuint16") return TypeDataIntN::create(16, true, true);
+      if (str == "varuint32") return TypeDataIntN::create(32, true, true);
       break;
     case 12:
       if (str == "continuation") return TypeDataContinuation::create();
@@ -120,22 +128,22 @@ static TypePtr try_parse_predefined_type(std::string_view str) {
   }
 
   if (str.starts_with("int")) {
-    if (TypePtr intN = parse_intN(str, false)) {
+    if (TypePtr intN = parse_intN_uintN(str.substr(3), false)) {
       return intN;
     }
   }
-  if (str.size() > 4 && str.starts_with("uint")) {
-    if (TypePtr uintN = parse_intN(str, true)) {
+  if (str.starts_with("uint")) {
+    if (TypePtr uintN = parse_intN_uintN(str.substr(4), true)) {
       return uintN;
     }
   }
-  if (str.size() > 4 && str.starts_with("bits")) {
-    if (TypePtr bitsN = parse_bytesN(str, true)) {
+  if (str.starts_with("bits")) {
+    if (TypePtr bitsN = parse_bytesN_bitsN(str.substr(4), true)) {
       return bitsN;
     }
   }
-  if (str.size() > 5 && str.starts_with("bytes")) {
-    if (TypePtr bytesN = parse_bytesN(str, false)) {
+  if (str.starts_with("bytes")) {
+    if (TypePtr bytesN = parse_bytesN_bitsN(str.substr(5), false)) {
       return bytesN;
     }
   }
@@ -164,6 +172,9 @@ class TypeNodesVisitorResolver {
         }
         if (const Symbol* sym = lookup_global_symbol(text)) {
           if (TypePtr custom_type = try_resolve_user_defined_type(cur_f, loc, sym, allow_without_type_arguments)) {
+            if (!v->loc.is_symbol_from_same_or_builtin_file(sym->loc)) {
+              sym->check_import_exists_when_used_from(cur_f, v->loc);
+            }
             return custom_type;
           }
         }
@@ -240,7 +251,7 @@ class TypeNodesVisitorResolver {
       if (alias_ref->is_generic_alias() && !allow_without_type_arguments) {
         fire_error_generic_type_used_without_T(cur_f, loc, alias_ref->as_human_readable());
       }
-      if (!alias_ref->was_visited_by_resolver()) {
+      if (!visited_aliases.contains(alias_ref)) {
         visit_symbol(alias_ref);
       }
       return TypeDataAlias::create(alias_ref);
@@ -249,7 +260,7 @@ class TypeNodesVisitorResolver {
       if (struct_ref->is_generic_struct() && !allow_without_type_arguments) {
         fire_error_generic_type_used_without_T(cur_f, loc, struct_ref->as_human_readable());
       }
-      if (!struct_ref->was_visited_by_resolver()) {
+      if (!visited_structs.contains(struct_ref)) {
         visit_symbol(struct_ref);
       }
       return TypeDataStruct::create(struct_ref);
@@ -347,7 +358,7 @@ public:
   static void visit_symbol(AliasDefPtr alias_ref) {
     static std::vector<AliasDefPtr> called_stack;
 
-    // prevent recursion like `type A = B; type B = A`
+    // prevent recursion like `type A = B; type B = A` (we can't create TypeDataAlias without a resolved underlying type)
     bool contains = std::find(called_stack.begin(), called_stack.end(), alias_ref) != called_stack.end();
     if (contains) {
       throw ParseError(alias_ref->loc, "type `" + alias_ref->name + "` circularly references itself");
@@ -362,35 +373,24 @@ public:
     TypeNodesVisitorResolver visitor(nullptr, alias_ref->genericTs, alias_ref->substitutedTs, false);
     TypePtr underlying_type = visitor.finalize_type_node(alias_ref->underlying_type_node);
     alias_ref->mutate()->assign_resolved_type(underlying_type);
-    alias_ref->mutate()->assign_visited_by_resolver();
+    visited_aliases.insert({alias_ref, 1});
     called_stack.pop_back();
   }
 
   static void visit_symbol(StructPtr struct_ref) {
-    static std::vector<StructPtr> called_stack;
-
-    // prevent recursion like `struct A { field: A }`
-    // currently, a struct is a tensor, and recursion always leads to infinite size (`A?` also, it's also on a stack)
-    // if there would be an annotation to store a struct in a tuple, then it has to be reconsidered
-    bool contains = std::find(called_stack.begin(), called_stack.end(), struct_ref) != called_stack.end();
-    if (contains) {
-      throw ParseError(struct_ref->loc, "struct `" + struct_ref->name + "` size is infinity due to recursive fields");
-    }
+    visited_structs.insert({struct_ref, 1});
 
     if (auto v_genericsT_list = struct_ref->ast_root->as<ast_struct_declaration>()->genericsT_list) {
       const GenericsDeclaration* genericTs = construct_genericTs(nullptr, v_genericsT_list);
       struct_ref->mutate()->assign_resolved_genericTs(genericTs);
     }
 
-    called_stack.push_back(struct_ref);
     TypeNodesVisitorResolver visitor(nullptr, struct_ref->genericTs, struct_ref->substitutedTs, false);
     for (int i = 0; i < struct_ref->get_num_fields(); ++i) {
       StructFieldPtr field_ref = struct_ref->get_field(i);
       TypePtr declared_type = visitor.finalize_type_node(field_ref->type_node);
       field_ref->mutate()->assign_resolved_type(declared_type);
     }
-    struct_ref->mutate()->assign_visited_by_resolver();
-    called_stack.pop_back();
   }
 
   static const GenericsDeclaration* construct_genericTs(TypePtr receiver_type, V<ast_genericsT_list> v_list) {
@@ -474,7 +474,8 @@ protected:
     // for static method calls, like "int.zero()" or "Point.create()", dot obj symbol is unresolved for now
     // so, resolve it as a type and store as a "type reference symbol"
     if (auto obj_ref = v->get_obj()->try_as<ast_reference>()) {
-      if (obj_ref->sym == nullptr) {
+      // also, `someFn.prop` doesn't make any sense, show "unknown type"; it also forces `address.staticMethod()` to work
+      if (obj_ref->sym == nullptr || obj_ref->sym->try_as<FunctionPtr>()) {
         std::string_view obj_type_name = obj_ref->get_identifier()->name;
         AnyTypeV obj_type_node = createV<ast_type_leaf_text>(obj_ref->loc, obj_type_name);
         if (obj_ref->has_instantiationTs()) {     // Container<int>.create
@@ -544,9 +545,12 @@ public:
     type_nodes_visitor = TypeNodesVisitorResolver(fun_ref, fun_ref->genericTs, fun_ref->substitutedTs, false);
 
     for (int i = 0; i < fun_ref->get_num_params(); ++i) {
-      const LocalVarData& param_var = fun_ref->parameters[i];
-      TypePtr declared_type = finalize_type_node(param_var.type_node);
-      param_var.mutate()->assign_resolved_type(declared_type);
+      LocalVarPtr param_ref = &fun_ref->parameters[i];
+      TypePtr declared_type = finalize_type_node(param_ref->type_node);
+      param_ref->mutate()->assign_resolved_type(declared_type);
+      if (param_ref->has_default_value()) {
+        parent::visit(param_ref->default_value);
+      }
     }
     if (fun_ref->return_type_node) {
       TypePtr declared_return_type = finalize_type_node(fun_ref->return_type_node);
@@ -578,6 +582,46 @@ public:
   }
 };
 
+// prevent recursion like `struct A { field: A }`;
+// currently, a struct is a tensor, and recursion always leads to infinite size (`A?` also, it's also on a stack);
+// if there is an annotation to store a struct in a tuple, then it has to be reconsidered;
+// it's crucial to detect it here; otherwise, get_width_on_stack() will silently face stack overflow
+class InfiniteStructSizeDetector {
+  static TypePtr visit_type_deeply(TypePtr type) {
+    return type->replace_children_custom([](TypePtr child) {
+      if (const TypeDataStruct* child_struct = child->try_as<TypeDataStruct>()) {
+        check_struct_for_infinite_size(child_struct->struct_ref);
+      }
+      if (const TypeDataAlias* child_alias = child->try_as<TypeDataAlias>()) {
+        return visit_type_deeply(child_alias->underlying_type);
+      }
+      return child;
+    });
+  };
+
+  static void check_struct_for_infinite_size(StructPtr struct_ref) {
+    static std::vector<StructPtr> called_stack;
+
+    bool contains = std::find(called_stack.begin(), called_stack.end(), struct_ref) != called_stack.end();
+    if (contains) {
+      throw ParseError(struct_ref->loc, "struct `" + struct_ref->name + "` size is infinity due to recursive fields");
+    }
+
+    called_stack.push_back(struct_ref);
+    for (StructFieldPtr field_ref : struct_ref->fields) {
+      visit_type_deeply(field_ref->declared_type);
+    }
+    called_stack.pop_back();
+  }
+
+public:
+  static void detect_and_fire_if_any_struct_is_infinite() {
+    for (auto [struct_ref, _] : visited_structs) {
+      check_struct_for_infinite_size(struct_ref);
+    }
+  }
+};
+
 void pipeline_resolve_types_and_aliases() {
   ResolveTypesInsideFunctionVisitor visitor;
 
@@ -599,18 +643,22 @@ void pipeline_resolve_types_and_aliases() {
         visitor.start_visiting_constant(v_const->const_ref);
 
       } else if (auto v_alias = v->try_as<ast_type_alias_declaration>()) {
-        if (!v_alias->alias_ref->was_visited_by_resolver()) {
+        if (!visited_aliases.contains(v_alias->alias_ref)) {
           TypeNodesVisitorResolver::visit_symbol(v_alias->alias_ref);
         }
 
       } else if (auto v_struct = v->try_as<ast_struct_declaration>()) {
-        if (!v_struct->struct_ref->was_visited_by_resolver()) {
+        if (!visited_structs.contains(v_struct->struct_ref)) {
           TypeNodesVisitorResolver::visit_symbol(v_struct->struct_ref);
         }
         visitor.start_visiting_struct_fields(v_struct->struct_ref);
       }
     }
   }
+
+  InfiniteStructSizeDetector::detect_and_fire_if_any_struct_is_infinite();
+  visited_structs.clear();
+  visited_aliases.clear();
 
   patch_builtins_after_stdlib_loaded();
 }

@@ -84,6 +84,9 @@ class ASTReplicator final {
   static V<ast_braced_expression> clone(V<ast_braced_expression> v) {
     return createV<ast_braced_expression>(v->loc, clone(v->get_block_statement()));
   }
+  static V<ast_braced_yield_result> clone(V<ast_braced_yield_result> v) {
+    return createV<ast_braced_yield_result>(v->loc, clone(v->get_expr()));
+  }
   static V<ast_artificial_aux_vertex> clone(V<ast_artificial_aux_vertex> v) {
     return createV<ast_artificial_aux_vertex>(v->loc, clone(v->get_wrapped_expr()), v->aux_data, v->inferred_type);
   }
@@ -97,7 +100,7 @@ class ASTReplicator final {
     return createV<ast_reference>(v->loc, clone(v->get_identifier()), v->has_instantiationTs() ? clone(v->get_instantiationTs()) : nullptr);
   }
   static V<ast_local_var_lhs> clone(V<ast_local_var_lhs> v) {
-    return createV<ast_local_var_lhs>(v->loc, clone(v->get_identifier()), clone(v->type_node), v->is_immutable, v->marked_as_redef);
+    return createV<ast_local_var_lhs>(v->loc, clone(v->get_identifier()), clone(v->type_node), v->is_immutable, v->is_lateinit, v->marked_as_redef);
   }
   static V<ast_local_vars_declaration> clone(V<ast_local_vars_declaration> v) {
     return createV<ast_local_vars_declaration>(v->loc, clone(v->get_expr()));
@@ -152,6 +155,9 @@ class ASTReplicator final {
   }
   static V<ast_not_null_operator> clone(V<ast_not_null_operator> v) {
     return createV<ast_not_null_operator>(v->loc, clone(v->get_expr()));
+  }
+  static V<ast_lazy_operator> clone(V<ast_lazy_operator> v) {
+    return createV<ast_lazy_operator>(v->loc, clone(v->get_expr()));
   }
   static V<ast_match_expression> clone(V<ast_match_expression> v) {
     return createV<ast_match_expression>(v->loc, clone(v->get_all_children()));
@@ -223,13 +229,13 @@ class ASTReplicator final {
     return createV<ast_instantiationT_list>(v->loc, clone(v->get_items()));
   }
   static V<ast_parameter> clone(V<ast_parameter> v) {
-    return createV<ast_parameter>(v->loc, v->param_name, clone(v->type_node), v->declared_as_mutate);
+    return createV<ast_parameter>(v->loc, v->param_name, clone(v->type_node), v->default_value ? clone(v->default_value) : nullptr,  v->declared_as_mutate);
   }
   static V<ast_parameter_list> clone(V<ast_parameter_list> v) {
     return createV<ast_parameter_list>(v->loc, clone(v->get_params()));
   }
   static V<ast_struct_field> clone(V<ast_struct_field> v) {
-    return createV<ast_struct_field>(v->loc, clone(v->get_identifier()), clone(v->get_default_value()), clone(v->type_node));
+    return createV<ast_struct_field>(v->loc, clone(v->get_identifier()), v->default_value ? clone(v->default_value) : nullptr, clone(v->type_node));
   }
   static V<ast_struct_body> clone(V<ast_struct_body> v) {
     return createV<ast_struct_body>(v->loc, clone(v->get_all_fields()));
@@ -273,6 +279,7 @@ class ASTReplicator final {
       case ast_empty_expression:                return clone(v->as<ast_empty_expression>());
       case ast_parenthesized_expression:        return clone(v->as<ast_parenthesized_expression>());
       case ast_braced_expression:               return clone(v->as<ast_braced_expression>());
+      case ast_braced_yield_result:             return clone(v->as<ast_braced_yield_result>());
       case ast_artificial_aux_vertex:           return clone(v->as<ast_artificial_aux_vertex>());
       case ast_tensor:                          return clone(v->as<ast_tensor>());
       case ast_bracket_tuple:                   return clone(v->as<ast_bracket_tuple>());
@@ -296,6 +303,7 @@ class ASTReplicator final {
       case ast_cast_as_operator:                return clone(v->as<ast_cast_as_operator>());
       case ast_is_type_operator:                return clone(v->as<ast_is_type_operator>());
       case ast_not_null_operator:               return clone(v->as<ast_not_null_operator>());
+      case ast_lazy_operator:                   return clone(v->as<ast_lazy_operator>());
       case ast_match_expression:                return clone(v->as<ast_match_expression>());
       case ast_match_arm:                       return clone(v->as<ast_match_arm>());
       case ast_object_field:                    return clone(v->as<ast_object_field>());
@@ -335,7 +343,8 @@ public:
       clone(v_orig->return_type_node),
       v_orig->genericsT_list ? clone(v_orig->genericsT_list) : nullptr,
       v_orig->tvm_method_id,
-      v_orig->flags
+      v_orig->flags,
+      v_orig->inline_mode
     );
   }
 
@@ -345,6 +354,8 @@ public:
       v_orig->loc,
       new_name_ident,
       clone(v_orig->genericsT_list),
+      v_orig->overflow1023_policy,
+      v_orig->has_opcode() ? static_cast<AnyExprV>(clone(v_orig->get_opcode())) : createV<ast_empty_expression>(v_orig->loc),
       clone(v_orig->get_struct_body())
     );
   }

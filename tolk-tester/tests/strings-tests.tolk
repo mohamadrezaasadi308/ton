@@ -1,20 +1,20 @@
-get ascii_slice(): slice {
+get fun ascii_slice(): slice {
   return"string";
 }
 
-get raw_slice(): slice {
+get fun raw_slice(): slice {
   return stringHexToSlice("abcdef");
 }
 
-get addr_slice(): slice {
-  return stringAddressToSlice("Ef8zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM0vF");
+get fun addr_slice(): address {
+  return address("Ef8zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM0vF");
 }
 
-get string_hex(): int {
+get fun string_hex(): int {
   return stringToBase256("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345");
 }
 
-get fun string_minihash(): int {    // 'get' and 'get fun' both possible
+get fun string_minihash(): int {
   return stringSha256_32("transfer(slice, int)");
 }
 
@@ -51,7 +51,7 @@ fun calcSliceBytes(slice: slice): tuple {
 fun main() {
   var s_ascii: slice = ascii_slice();
   var s_raw: slice = raw_slice();
-  var s_addr: slice = addr_slice();
+  var s_addr: address = addr_slice();
   var i_hex: int = string_hex();
   var i_mini: int = string_minihash();
   var i_maxi: int = string_maxihash();
@@ -59,7 +59,7 @@ fun main() {
   var i_crc16: int = string_crc16();
   assert(sdeq(s_ascii, newc().storeUint(0x737472696E67, 12 * 4).endcs())) throw 101;
   assert(sdeq(s_raw, newc().storeUint(0xABCDEF, 6 * 4).endcs())) throw 102;
-  assert(sdeq(s_addr, newc().storeUint(4, 3).storeInt(-1, 8)
+  assert(sdeq(s_addr as slice, newc().storeUint(4, 3).storeInt(-1, 8)
     .storeUint(0x3333333333333333333333333333333333333333333333333333333333333333, 256).endcs()), 103);
   assert(i_hex == 0x4142434445464748494A4B4C4D4E4F505152535455565758595A303132333435) throw 104;
   assert(i_mini == 0x7a62e8a8) throw 105;
@@ -78,5 +78,5 @@ fun test1() {
 @testcase | 0   | | 0
 @testcase | 101 | | [ 65 66 67 68 ]
 
-@code_hash 55974318379341089957961227475446008591490555692181953973486962465702042912657
+@code_hash 52991558142486159683575375539594116045551936710713942466413832119934760926753
 */

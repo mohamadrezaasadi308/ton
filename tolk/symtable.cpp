@@ -21,6 +21,19 @@
 
 namespace tolk {
 
+void Symbol::check_import_exists_when_used_from(FunctionPtr cur_f, SrcLocation used_loc) const {
+  const SrcFile* declared_in = loc.get_src_file();
+  bool has_import = false;
+  for (const SrcFile::ImportDirective& import : used_loc.get_src_file()->imports) {
+    if (import.imported_file == declared_in) {
+      has_import = true;
+    }
+  }
+  if (!has_import) {
+    throw ParseError(cur_f, used_loc, "Using a non-imported symbol `" + name + "`\nhint: forgot to import \"" + declared_in->extract_short_name() + "\"?");
+  }
+}
+
 std::string FunctionData::as_human_readable() const {
   if (!is_generic_function()) {
     return name;  // if it's generic instantiation like `f<int>`, its name is "f<int>", not "f"
@@ -42,6 +55,15 @@ std::string StructData::as_human_readable() const {
   return name + genericTs->as_human_readable();
 }
 
+LocalVarPtr FunctionData::find_param(std::string_view name) const {
+  for (const LocalVarData& param_data : parameters) {
+    if (param_data.name == name) {
+      return &param_data;
+    }
+  }
+  return nullptr;
+}
+
 bool FunctionData::does_need_codegen() const {
   // when a function is declared, but not referenced from code in any way, don't generate its body
   if (!is_really_used() && G.settings.remove_unused_functions) {
@@ -58,6 +80,10 @@ bool FunctionData::does_need_codegen() const {
   }
   // generic functions also don't need code generation, only generic instantiations do
   if (is_generic_function()) {
+    return false;
+  }
+  // if calls to this function were inlined in place, the function itself is omitted from fif
+  if (is_inlined_in_place()) {
     return false;
   }
   // currently, there is no inlining, all functions are codegenerated
@@ -105,6 +131,10 @@ void FunctionData::assign_is_really_used() {
   this->flags |= flagReallyUsed;
 }
 
+void FunctionData::assign_inline_mode_in_place() {
+  this->inline_mode = FunctionInlineMode::inlineInPlace;
+}
+
 void FunctionData::assign_arg_order(std::vector<int>&& arg_order) {
   this->arg_order = std::move(arg_order);
 }
@@ -129,6 +159,10 @@ void GlobalConstData::assign_init_value(AnyExprV init_value) {
   this->init_value = init_value;
 }
 
+void LocalVarData::assign_used_as_lval() {
+  this->flags |= flagUsedAsLVal;
+}
+
 void LocalVarData::assign_ir_idx(std::vector<int>&& ir_idx) {
   this->ir_idx = std::move(ir_idx);
 }
@@ -141,8 +175,8 @@ void LocalVarData::assign_inferred_type(TypePtr inferred_type) {
   this->declared_type = inferred_type;
 }
 
-void AliasDefData::assign_visited_by_resolver() {
-  this->flags |= flagVisitedByResolver;
+void LocalVarData::assign_default_value(AnyExprV default_value) {
+  this->default_value = default_value;
 }
 
 void AliasDefData::assign_resolved_genericTs(const GenericsDeclaration* genericTs) {
@@ -163,10 +197,6 @@ void StructFieldData::assign_default_value(AnyExprV default_value) {
   this->default_value = default_value;
 }
 
-void StructData::assign_visited_by_resolver() {
-  this->flags |= flagVisitedByResolver;
-}
-
 void StructData::assign_resolved_genericTs(const GenericsDeclaration* genericTs) {
   if (this->substitutedTs == nullptr) {
     this->genericTs = genericTs;
@@ -180,6 +210,24 @@ StructFieldPtr StructData::find_field(std::string_view field_name) const {
     }
   }
   return nullptr;
+}
+
+// formats opcode as "x{...}" or "b{...}"
+std::string StructData::PackOpcode::format_as_slice() const {
+  const int base = prefix_len % 4 == 0 ? 16 : 2;
+  const int s_len = base == 16 ? prefix_len / 4 : prefix_len;
+  const char* digits = "0123456789abcdef";
+
+  std::string result(s_len + 3, '0');
+  result[0] = base == 16 ? 'x' : 'b';
+  result[1] = '{';
+  result[s_len + 3 - 1] = '}';
+  int64_t opcode = pack_prefix;
+  for (int i = s_len - 1; i >= 0 && opcode != 0; --i) {
+    result[2 + i] = digits[opcode % base];
+    opcode /= base;
+  }
+  return result;
 }
 
 GNU_ATTRIBUTE_NORETURN GNU_ATTRIBUTE_COLD
@@ -234,12 +282,28 @@ void GlobalSymbolTable::add_struct(StructPtr s_sym) {
   }
 }
 
+void GlobalSymbolTable::replace_function(FunctionPtr f_sym) {
+  auto key = key_hash(f_sym->name);
+  assert(entries.contains(key));
+  entries[key] = f_sym;
+}
+
 const Symbol* lookup_global_symbol(std::string_view name) {
   return G.symtable.lookup(name);
 }
 
 FunctionPtr lookup_function(std::string_view name) {
   return G.symtable.lookup(name)->try_as<FunctionPtr>();
+}
+
+std::vector<FunctionPtr> lookup_methods_with_name(std::string_view name) {
+  std::vector<FunctionPtr> result;
+  for (FunctionPtr method_ref : G.all_methods) {
+    if (method_ref->method_name == name) {
+      result.push_back(method_ref);
+    }
+  }
+  return result;
 }
 
 }  // namespace tolk

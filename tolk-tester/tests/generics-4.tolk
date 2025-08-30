@@ -1,4 +1,6 @@
+@noinline
 fun eqUnusedT<T=null>(v: int) { return v; }
+@noinline
 fun eqUnusedU<T, U = never>(v: T) { if (v is int123) { __expect_type(v as U, "never"); } return v; }
 
 fun dup<T1 = int?, T2 = slice?>(x: T1, y: T2): (T1, T2) { return (x, y) }
@@ -45,6 +47,7 @@ fun createParameters<TBody = null, TInit = null>(bounce: bool, body: TBody, data
     return { bounce, body, init: { value: ton("0"), data } };
 }
 
+@noinline
 fun mySend<TBody = never, TInit = never>(p: Parameters<TBody, TInit>): int {
     var total = 0;
     if (p.bounce) {
@@ -146,26 +149,47 @@ fun test7() {
     return (v1, v2, v3, v4);
 }
 
+struct FakeGeneric8<T> {
+    alwaysInt: int;
+}
+
+struct Snake8 {
+    next: FakeGeneric8<Snake8>;     // it's not a recursive struct, it's okay
+    next2: FakeGeneric8<Snake8>?;
+    next3: FakeGeneric8<FakeGeneric8<Snake8>>;
+}
+
+@method_id(108)
+fun test8() {
+    var sn: Snake8 = {
+        next: { alwaysInt: 10 },
+        next2: null,
+        next3: { alwaysInt: 20 }
+    };
+    return sn;
+}
+
 fun main() {
 }
 
 /**
 @testcase | 103 |      | 10 20 30 777 40 40
 @testcase | 104 |      | (null) (null) (null)
-@testcase | 105 |      | -1 (null) 0 (null) 133 777 0 123 0 456 132
+@testcase | 105 |      | -1 (null) 0 (null) typeid-6 777 0 123 0 456 typeid-5
 @testcase | 106 |      | -1 0 -1 -1
 @testcase | 107 |      | 1 10 110 117
+@testcase | 108 |      | 10 (null) 20
 
-@fif_codegen DECLPROC eqUnusedT<null>
-@fif_codegen DECLPROC eqUnusedU<builder,never>
-@fif_codegen DECLPROC mySend<never,never>
-@fif_codegen DECLPROC mySend<int,never>
-@fif_codegen DECLPROC mySend<int,builder>
-@fif_codegen DECLPROC mySend<never,[int]?>
+@fif_codegen DECLPROC eqUnusedT<null>()
+@fif_codegen DECLPROC eqUnusedU<builder,never>()
+@fif_codegen DECLPROC mySend<never,never>()
+@fif_codegen DECLPROC mySend<int,never>()
+@fif_codegen DECLPROC mySend<int,builder>()
+@fif_codegen DECLPROC mySend<never,[int]?>()
 
 @fif_codegen
 """
-  test6 PROC:<{                 //
+  test6() PROC:<{               //
     NEWC                        //  '8
     ENDC                        //  p.init.USlot2
     -1 PUSHINT                  //  p.init.USlot2 '11=-1
