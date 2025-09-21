@@ -27,7 +27,7 @@
 #include "vm/dictops.h"
 #include "vm/dict.h"
 
-namespace vm {
+ {
 
 template <typename T>
 void push_dict(Stack& stack, T&& dict) {
@@ -79,11 +79,11 @@ int dict_nonempty_chk(const CellSlice& dict) {
   return res;
 }
 
-int exec_skip_dict(VmState* st) {
-  Stack& stack = st->get_stack();
+exec_skip_dict(* st) {
+  & stack = st->get_stack();
   VM_LOG(st) << "execute SKIPDICT\n";
-  auto dict = stack.pop_cellslice();
-  int res = dict_nonempty_chk(*dict);
+   dict = stack.pop_cellslice();
+   res = dict_nonempty_chk(*dict);
   dict.write().advance_ext(1, res);
   stack.push_cellslice(std::move(dict));
   return 0;
