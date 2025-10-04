@@ -85,15 +85,9 @@ void LiteQuery::abort_query(td::Status reason) {
   if (acc_state_promise_) {
     acc_state_promise_.set_error(std::move(reason));
   } else if (promise_) {
+    td::actor::send_closure(manager_, &ValidatorManager::add_lite_query_stats, query_obj_ ? query_obj_->get_id() : 0,
+                            false);
     promise_.set_error(std::move(reason));
-  }
-  stop();
-}
-
-void LiteQuery::abort_query_ext(td::Status reason, std::string comment) {
-  LOG(INFO) << "aborted liteserver query: " << comment << " : " << reason.to_string();
-  if (promise_) {
-    promise_.set_error(reason.move_as_error_prefix(comment + " : "));
   }
   stop();
 }
@@ -120,6 +114,8 @@ bool LiteQuery::finish_query(td::BufferSlice result, bool skip_cache_update) {
     td::actor::send_closure(cache_, &LiteServerCache::update, cache_key_, result.clone());
   }
   if (promise_) {
+    td::actor::send_closure(manager_, &ValidatorManager::add_lite_query_stats, query_obj_ ? query_obj_->get_id() : 0,
+                            true);
     promise_.set_result(std::move(result));
     stop();
     return true;
@@ -139,7 +135,6 @@ void LiteQuery::start_up() {
 
   auto F = fetch_tl_object<ton::lite_api::Function>(query_, true);
   if (F.is_error()) {
-    td::actor::send_closure(manager_, &ValidatorManager::add_lite_query_stats, 0);  // unknown
     abort_query(F.move_as_error());
     return;
   }
@@ -192,7 +187,6 @@ bool LiteQuery::use_cache()  {
 }
 
 void LiteQuery::perform() {
-  td::actor::send_closure(manager_, &ValidatorManager::add_lite_query_stats, query_obj_->get_id());
   lite_api::downcast_call(
       *query_obj_,
       td::overloaded(
@@ -1438,12 +1432,15 @@ static td::Ref<vm::Tuple> prepare_vm_c7(ton::UnixTime now, ton::LogicalTime lt, 
   if (config && config->get_global_version() >= 6) {
     tuple.push_back(vm::StackEntry::maybe(config->get_unpacked_config_tuple(now)));  // unpacked_config_tuple:[...]
     tuple.push_back(due_payment);                                                    // due_payment:Integer
-    // precomiled_gas_usage:(Maybe Integer)
+    // precompiled_gas_usage:(Maybe Integer)
     td::optional<block::PrecompiledContractsConfig::Contract> precompiled;
     if (my_code.not_null()) {
       precompiled = config->get_precompiled_contracts_config().get_contract(my_code->get_hash().bits());
     }
     tuple.push_back(precompiled ? td::make_refint(precompiled.value().gas_usage) : vm::StackEntry());
+  }
+  if (config && config->get_global_version() >= 11) {
+    tuple.push_back(block::transaction::Transaction::prepare_in_msg_params_tuple(nullptr, {}, {}));
   }
   auto tuple_ref = td::make_cnt_ref<std::vector<vm::StackEntry>>(std::move(tuple));
   LOG(DEBUG) << "SmartContractInfo initialized with " << vm::StackEntry(tuple_ref).to_string();
@@ -1520,11 +1517,17 @@ void LiteQuery::finish_runSmcMethod(td::BufferSlice shard_proof, td::BufferSlice
     libraries.push_back(acc_libs);
   }
   vm::GasLimits gas{gas_limit, gas_limit};
-  vm::VmState vm{code, std::move(stack_), gas, 1, std::move(data), vm::VmLog::Null(), std::move(libraries)};
+  vm::VmState vm{code,
+                 config->get_global_version(),
+                 std::move(stack_),
+                 gas,
+                 1,
+                 std::move(data),
+                 vm::VmLog::Null(),
+                 std::move(libraries)};
   auto c7 = prepare_vm_c7(gen_utime, gen_lt, td::make_ref<vm::CellSlice>(acc.addr->clone()), balance, config.get(),
                           std::move(code), due_payment);
   vm.set_c7(c7);  // tuple with SmartContractInfo
-  vm.set_global_version(config->get_global_version());
   // vm.incr_stack_trace(1);    // enable stack dump after each step
   LOG(INFO) << "starting VM to run GET-method of smart contract " << acc_workchain_ << ":" << acc_addr_.to_hex();
   // **** RUN VM ****
@@ -1899,6 +1902,9 @@ void LiteQuery::continue_getConfigParams(int mode, std::vector<int> param_list) 
     }
     cfg = res.move_as_ok();
   } else {
+    if (mode & block::ConfigInfo::needPrevBlocks) {
+      mode |= block::ConfigInfo::needCapabilities;
+    }
     auto res = block::ConfigInfo::extract_config(mpb.root(), mode);
     if (res.is_error()) {
       fatal_error(res.move_as_error());
@@ -3669,7 +3675,7 @@ void LiteQuery::finish_getDispatchQueueMessages(StdSmcAddress addr, LogicalTime 
       fatal_error(r_messages_boc.move_as_error());
       return;
     }
-    messages_boc = std::move(messages_boc);
+    messages_boc = r_messages_boc.move_as_ok();
   }
   LOG(INFO) << "getDispatchQueueMessages(" << blk_id_.to_str() << ", " << mode_ << ") query completed";
   auto b = ton::create_serialize_tl_object<ton::lite_api::liteServer_dispatchQueueMessages>(

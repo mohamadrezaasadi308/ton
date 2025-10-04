@@ -214,7 +214,7 @@ int exec_ret_data(VmState* st) {
 
 // Mode:
 // +1 = same_c3 (set c3 to code)
-// +2 = push_0 (push an implicit 0 before running the code)
+// +2 = push_0 (push an implicit 0 before running the code); only works with +1 enabled
 // +4 = load c4 (persistent data) from stack and return its final value
 // +8 = load gas limit from stack and return consumed gas
 // +16 = load c7 (smart-contract context)
@@ -261,10 +261,10 @@ int exec_runvm_common(VmState* st, unsigned mode) {
   vm::GasLimits gas{gas_limit, gas_max};
 
   VmStateInterface::Guard guard{nullptr}; // Don't consume gas for creating/loading cells during VM init
-  VmState new_state{std::move(code), std::move(new_stack),     gas,          (int)mode & 3, std::move(data),
-                    VmLog{},         std::vector<Ref<Cell>>{}, std::move(c7)};
+  VmState new_state{
+      std::move(code), st->get_global_version(), std::move(new_stack), gas, (int)mode & 3, std::move(data),
+      VmLog{},         std::vector<Ref<Cell>>{}, std::move(c7)};
   new_state.set_chksig_always_succeed(st->get_chksig_always_succeed());
-  new_state.set_global_version(st->get_global_version());
   st->run_child_vm(std::move(new_state), with_data, mode & 32, mode & 8, mode & 128, ret_vals);
   return 0;
 }

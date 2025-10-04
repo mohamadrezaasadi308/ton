@@ -16,56 +16,22 @@
 */
 #include "tolk.h"
 #include "compiler-state.h"
+#include "type-system.h"
 
 namespace tolk {
+
+// functions returning "never" are assumed to interrupt flow
+// for instance, variables after their call aren't considered used
+// its main purpose is `throw` statement, it's a call to a built-in `__throw` function
+static bool does_function_always_throw(FunctionPtr fun_ref) {
+  return fun_ref->inferred_return_type == TypeDataNever::create();
+}
 
 /*
  *  
  *   ANALYZE AND PREPROCESS ABSTRACT CODE
  * 
  */
-
-void CodeBlob::simplify_var_types() {
-  for (TmpVar& var : vars) {
-    TypeExpr::remove_indirect(var.v_type);
-    var.v_type->recompute_width();
-  }
-}
-
-int CodeBlob::split_vars(bool strict) {
-  int n = var_cnt, changes = 0;
-  for (int j = 0; j < var_cnt; j++) {
-    TmpVar& var = vars[j];
-    if (strict && var.v_type->minw != var.v_type->maxw) {
-      throw ParseError{var.where, "variable does not have fixed width, cannot manipulate it"};
-    }
-    std::vector<TypeExpr*> comp_types;
-    int k = var.v_type->extract_components(comp_types);
-    tolk_assert(k <= 254 && n <= 0x7fff00);
-    tolk_assert((unsigned)k == comp_types.size());
-    if (k != 1) {
-      var.coord = ~((n << 8) + k);
-      for (int i = 0; i < k; i++) {
-        auto v = create_var(comp_types[i], vars[j].sym_idx, vars[j].where);
-        tolk_assert(v == n + i);
-        tolk_assert(vars[v].idx == v);
-        vars[v].coord = ((int)j << 8) + i + 1;
-      }
-      n += k;
-      ++changes;
-    } else if (strict && var.v_type->minw != 1) {
-      throw ParseError{var.where,
-                            "cannot work with variable or variable component of width greater than one"};
-    }
-  }
-  if (!changes) {
-    return 0;
-  }
-  for (auto& op : ops) {
-    op.split_vars(vars);
-  }
-  return changes;
-}
 
 bool CodeBlob::compute_used_code_vars() {
   VarDescrList empty_var_info;
@@ -96,10 +62,10 @@ bool operator==(const VarDescrList& x, const VarDescrList& y) {
 }
 
 bool same_values(const VarDescr& x, const VarDescr& y) {
-  if (x.val != y.val || x.int_const.is_null() != y.int_const.is_null()) {
+  if (x.val != y.val || x.is_int_const() != y.is_int_const()) {
     return false;
   }
-  if (x.int_const.not_null() && cmp(x.int_const, y.int_const) != 0) {
+  if (x.is_int_const() && *x.int_const != *y.int_const) {
     return false;
   }
   return true;
@@ -303,17 +269,6 @@ VarDescrList& VarDescrList::operator|=(const VarDescrList& y) {
   }
 }
 
-VarDescrList& VarDescrList::operator&=(const VarDescrList& values) {
-  for (const VarDescr& vd : values.list) {
-    VarDescr* item = operator[](vd.idx);
-    if (item) {
-      *item &= vd;
-    }
-  }
-  unreachable |= values.unreachable;
-  return *this;
-}
-
 VarDescrList& VarDescrList::import_values(const VarDescrList& values) {
   if (values.unreachable) {
     set_unreachable();
@@ -366,6 +321,17 @@ bool Op::compute_used_vars(const CodeBlob& code, bool edit) {
           set_disabled();
         }
         return std_compute_used_vars(true);
+      }
+      if (cl == _Call && does_function_always_throw(f_sym)) {
+        VarDescrList new_var_info;    // empty, not next->var_info
+        if (args.size() == right.size()) {
+          for (const VarDescr& arg : args) {
+            new_var_info.add_var(arg.idx, arg.is_unused());
+          }
+        } else {
+          new_var_info.add_vars(right, false);
+        }
+        return set_var_info(std::move(new_var_info));
       }
       return std_compute_used_vars();
     }
@@ -535,7 +501,7 @@ bool Op::compute_used_vars(const CodeBlob& code, bool edit) {
     }
     default:
       std::cerr << "fatal: unknown operation <??" << cl << "> in compute_used_vars()\n";
-      throw ParseError{where, "unknown operation"};
+      throw ParseError(loc, "unknown operation");
   }
 }
 
@@ -557,19 +523,18 @@ bool prune_unreachable(std::unique_ptr<Op>& ops) {
     case Op::_SliceConst:
     case Op::_GlobVar:
     case Op::_SetGlob:
-    case Op::_Call:
     case Op::_CallInd:
     case Op::_Tuple:
     case Op::_UnTuple:
     case Op::_Import:
+    case Op::_Let:
       reach = true;
       break;
-    case Op::_Let: {
-      reach = true;
-      break;
-    }
     case Op::_Return:
       reach = false;
+      break;
+    case Op::_Call:
+      reach = !does_function_always_throw(op.f_sym);
       break;
     case Op::_If: {
       // if left then block0 else block1; ...
@@ -618,7 +583,7 @@ bool prune_unreachable(std::unique_ptr<Op>& ops) {
           op.cl = Op::_If;
           std::unique_ptr<Op> new_op = std::move(op.block0);
           op.block0 = std::move(op.block1);
-          op.block1 = std::make_unique<Op>(op.next->where, Op::_Nop);
+          op.block1 = std::make_unique<Op>(op.next->loc, Op::_Nop);
           new_op->last().next = std::move(ops);
           ops = std::move(new_op);
         }
@@ -664,7 +629,7 @@ bool prune_unreachable(std::unique_ptr<Op>& ops) {
     }
     default:
       std::cerr << "fatal: unknown operation <??" << op.cl << ">\n";
-      throw ParseError{op.where, "unknown operation in prune_unreachable()"};
+      throw ParseError(op.loc, "unknown operation in prune_unreachable()");
   }
   if (reach) {
     return prune_unreachable(op.next);
@@ -678,7 +643,7 @@ bool prune_unreachable(std::unique_ptr<Op>& ops) {
 
 void CodeBlob::prune_unreachable_code() {
   if (prune_unreachable(ops)) {
-    throw ParseError{loc, "control reaches end of function"};
+    throw ParseError(fun_ref->loc, "control reaches end of function");
   }
 }
 
@@ -687,7 +652,7 @@ void CodeBlob::fwd_analyze() {
   tolk_assert(ops && ops->cl == Op::_Import);
   for (var_idx_t i : ops->left) {
     values += i;
-    if (vars[i].v_type->is_int()) {
+    if (vars[i].v_type == TypeDataInt::create()) {
       values[i]->val |= VarDescr::_Int;
     }
   }
@@ -713,6 +678,16 @@ void Op::prepare_args(VarDescrList values) {
   }
 }
 
+void Op::maybe_swap_builtin_args_to_compile() {
+  // in builtins.cpp, where optimizing constants are done, implementations assume that args are passed ltr (as declared);
+  // if a function has arg_order, called arguments might have been put on a stack not ltr, but in asm order;
+  // here we swap them back before calling FunctionBodyBuiltin compile, and also swap after
+  tolk_assert(arg_order_already_equals_asm());
+  if (f_sym->method_name == "storeUint" || f_sym->method_name == "storeInt" || f_sym->method_name == "storeBool") {
+    std::swap(args[0], args[1]);
+  }
+}
+
 VarDescrList Op::fwd_analyze(VarDescrList values) {
   var_info.import_values(values);
   switch (cl) {
@@ -732,15 +707,22 @@ VarDescrList Op::fwd_analyze(VarDescrList values) {
     }
     case _Call: {
       prepare_args(values);
-      auto func = dynamic_cast<const SymValAsmFunc*>(fun_ref->value);
-      if (func) {
+      if (!f_sym->is_code_function()) {
         std::vector<VarDescr> res;
         res.reserve(left.size());
         for (var_idx_t i : left) {
           res.emplace_back(i);
         }
         AsmOpList tmp;
-        func->compile(tmp, res, args, where);  // abstract interpretation of res := f (args)
+        if (!f_sym->is_asm_function()) {
+          if (arg_order_already_equals_asm()) {
+            maybe_swap_builtin_args_to_compile();
+          }
+          std::get<FunctionBodyBuiltinAsmOp*>(f_sym->body)->compile(tmp, res, args, loc);
+          if (arg_order_already_equals_asm()) {
+            maybe_swap_builtin_args_to_compile();
+          }
+        }
         int j = 0;
         for (var_idx_t i : left) {
           values.add_newval(i).set_value(res[j++]);
@@ -749,6 +731,9 @@ VarDescrList Op::fwd_analyze(VarDescrList values) {
         for (var_idx_t i : left) {
           values.add_newval(i);
         }
+      }
+      if (does_function_always_throw(f_sym)) {
+        values.set_unreachable();
       }
       break;
     }
@@ -851,7 +836,7 @@ VarDescrList Op::fwd_analyze(VarDescrList values) {
     }
     default:
       std::cerr << "fatal: unknown operation <??" << cl << ">\n";
-      throw ParseError{where, "unknown operation in fwd_analyze()"};
+      throw ParseError(loc, "unknown operation in fwd_analyze()");
   }
   if (next) {
     return next->fwd_analyze(std::move(values));
@@ -878,26 +863,13 @@ bool Op::set_noreturn(bool flag) {
   return flag;
 }
 
-void Op::set_impure(const CodeBlob &code) {
-  // todo calling this function with `code` is a bad design (flags are assigned after Op is constructed)
-  // later it's better to check this somewhere in code.emplace_back()
-  if (code.flags & CodeBlob::_ForbidImpure) {
-    throw ParseError(where, "an impure operation in a pure function");
-  }
+void Op::set_impure_flag() {
   flags |= _Impure;
 }
 
-void Op::set_impure(const CodeBlob &code, bool flag) {
-  if (flag) {
-    if (code.flags & CodeBlob::_ForbidImpure) {
-      throw ParseError(where, "an impure operation in a pure function");
-    }
-    flags |= _Impure;
-  } else {
-    flags &= ~_Impure;
-  }
+void Op::set_arg_order_already_equals_asm_flag() {
+  flags |= _ArgOrderAlreadyEqualsAsm;
 }
-
 
 bool Op::mark_noreturn() {
   switch (cl) {
@@ -915,11 +887,37 @@ bool Op::mark_noreturn() {
     case _SetGlob:
     case _GlobVar:
     case _CallInd:
-    case _Call:
       return set_noreturn(next->mark_noreturn());
     case _Return:
       return set_noreturn();
-    case _If:
+    case _Call:
+      return set_noreturn(next->mark_noreturn() || does_function_always_throw(f_sym));
+    case _If: {
+      // this very-not-beautiful code does the following:
+      // replace `if (cond) { return; } else { block1; } next;` with `if (cond) { return; } block1; next`
+      // purpose: to make code like `if (...) { ... return; } else if (...) { ... return; } ...` act like without else
+      // similarly, `match (...) { v1 => { ... return; } ...}` is internally transformed to IF-ELSE
+      // (that's why such transformation is done at IR level, not in AST)
+      // without these code (without else removed), extra RETALT instructions are inserted, not necessary actually
+      // implementation is UGLY, because currently there is no way to perform IR replacements
+      // in the future, anyway, IR implementation should be rewritten, for easier traversing and replacement
+      // btw, now it doesn't work with `if (!...)` (v->is_ifnot), else "keyword" is not removed
+      if (block0->mark_noreturn() && !block1->is_empty()) {
+        VarDescrList block1_var_info = block1->var_info;  // important to keep it
+        Op* last_in_block1 = block1.get();
+        while (last_in_block1->next->cl != Op::_Nop) {    // find the tail of a forward list of Ops
+          last_in_block1 = last_in_block1->next.get();
+        }
+        last_in_block1->next = std::move(next);
+        next = std::move(block1);
+        block1 = std::make_unique<Op>(loc, Op::_Nop);
+        block1->var_info = std::move(block1_var_info);
+      } else {
+        block1->mark_noreturn();
+      }
+      bool next_noreturn = next->mark_noreturn();
+      return set_noreturn((block0->noreturn() && block1->noreturn()) || next_noreturn);
+    }
     case _TryCatch:
       // note, that & | (not && ||) here and below is mandatory to invoke both left and right calls
       return set_noreturn((static_cast<int>(block0->mark_noreturn()) & static_cast<int>(block1 && block1->mark_noreturn())) | static_cast<int>(next->mark_noreturn()));
@@ -936,7 +934,7 @@ bool Op::mark_noreturn() {
       return set_noreturn(next->mark_noreturn());
     default:
       std::cerr << "fatal: unknown operation <??" << cl << ">\n";
-      throw ParseError{where, "unknown operation in mark_noreturn()"};
+      throw ParseError(loc, "unknown operation in mark_noreturn()");
   }
 }
 

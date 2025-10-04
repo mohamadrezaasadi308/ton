@@ -26,7 +26,6 @@ enum TokenType {
   tok_empty,
 
   tok_fun,
-  tok_get,
   tok_type,
   tok_enum,
   tok_struct,
@@ -45,10 +44,11 @@ enum TokenType {
   tok_colon,
   tok_asm,
   tok_builtin,
+  tok_private,
+  tok_readonly,
 
   tok_int_const,
   tok_string_const,
-  tok_string_modifier,
   tok_true,
   tok_false,
   tok_null,
@@ -57,10 +57,31 @@ enum TokenType {
   tok_dot,
 
   tok_plus,
+  tok_set_plus,
   tok_minus,
+  tok_set_minus,
   tok_mul,
+  tok_set_mul,
   tok_div,
+  tok_set_div,
   tok_mod,
+  tok_set_mod,
+  tok_double_plus,
+  tok_double_minus,
+  tok_lshift,
+  tok_set_lshift,
+  tok_rshift,
+  tok_set_rshift,
+  tok_rshiftR,
+  tok_rshiftC,
+  tok_bitwise_and,
+  tok_set_bitwise_and,
+  tok_bitwise_or,
+  tok_set_bitwise_or,
+  tok_bitwise_xor,
+  tok_set_bitwise_xor,
+  tok_bitwise_not,
+
   tok_question,
   tok_comma,
   tok_semicolon,
@@ -77,32 +98,14 @@ enum TokenType {
   tok_logical_not,
   tok_logical_and,
   tok_logical_or,
-  tok_bitwise_and,
-  tok_bitwise_or,
-  tok_bitwise_xor,
-  tok_bitwise_not,
 
   tok_eq,
   tok_neq,
   tok_leq,
   tok_geq,
   tok_spaceship,
-  tok_lshift,
-  tok_rshift,
-  tok_rshiftR,
-  tok_rshiftC,
   tok_divR,
   tok_divC,
-  tok_set_plus,
-  tok_set_minus,
-  tok_set_mul,
-  tok_set_div,
-  tok_set_mod,
-  tok_set_lshift,
-  tok_set_rshift,
-  tok_set_bitwise_and,
-  tok_set_bitwise_or,
-  tok_set_bitwise_xor,
 
   tok_return,
   tok_repeat,
@@ -116,17 +119,13 @@ enum TokenType {
   tok_assert,
   tok_if,
   tok_else,
+  tok_match,
+  tok_lazy,
 
-  tok_int,
-  tok_cell,
-  tok_bool,
-  tok_slice,
-  tok_builder,
-  tok_continuation,
-  tok_tuple,
-  tok_auto,
-  tok_void,
   tok_arrow,
+  tok_double_arrow,
+  tok_as,
+  tok_is,
 
   tok_tolk,
   tok_semver,
@@ -164,6 +163,13 @@ class Lexer {
   }
 
 public:
+
+  struct SavedPositionForLookahead {
+    const char* p_next = nullptr;
+    int cur_token_idx = 0;
+    Token cur_token;
+    SrcLocation loc;
+  };
 
   explicit Lexer(const SrcFile* file);
   Lexer(const Lexer&) = delete;
@@ -208,6 +214,10 @@ public:
   void next();
   void next_special(TokenType parse_next_as, const char* str_expected);
 
+  SavedPositionForLookahead save_parsing_position() const;
+  void restore_position(SavedPositionForLookahead saved);
+  void hack_replace_rshift_with_one_triangle();
+
   void check(TokenType next_tok, const char* str_expected) const {
     if (cur_token.type != next_tok) {
       unexpected(str_expected); // unlikely path, not inlined
@@ -229,6 +239,6 @@ public:
 void lexer_init();
 
 // todo #ifdef TOLK_PROFILING
-void lexer_measure_performance(const AllSrcFiles& files_to_just_parse);
+void lexer_measure_performance(const AllRegisteredSrcFiles& files_to_just_parse);
 
 }  // namespace tolk

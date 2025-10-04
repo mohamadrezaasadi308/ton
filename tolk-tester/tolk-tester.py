@@ -1,4 +1,4 @@
-# Usage: `tolk-tester.py tests_dir` OR `tolk-tester.py test_file.tolk`
+# Usage: `tolk-tester.py tests_dir` OR `tolk-tester.py tests_dir file_pattern`
 # from current dir, providing some env (see getenv() calls).
 # Every .tolk file should provide /* testcase description in a comment */, consider tests/ folder.
 #
@@ -36,27 +36,33 @@ TMP_DIR = tempfile.mkdtemp()
 
 class CmdLineOptions:
     def __init__(self, argv: List[str]):
-        if len(argv) != 2:
-            print("Usage: tolk-tester.py tests_dir OR tolk-tester.py test_file.tolk", file=sys.stderr)
+        if len(argv) < 2:
+            print("Usage: tolk-tester.py tests_dir [file_pattern]", file=sys.stderr)
             exit(1)
-        if not os.path.exists(argv[1]):
-            print("Input '%s' doesn't exist" % argv[1], file=sys.stderr)
+        if not os.path.isdir(argv[1]):
+            print("Directory '%s' doesn't exist" % argv[1], file=sys.stderr)
             exit(1)
 
-        if os.path.isdir(argv[1]):
-            self.tests_dir = argv[1]
-            self.test_file = None
-        else:
-            self.tests_dir = os.path.dirname(argv[1])
-            self.test_file = argv[1]
+        self.tests_dir = argv[1]
+        self.file_pattern = argv[2] if len(argv) > 2 else None
 
     def find_tests(self) -> List[str]:
-        if self.test_file is not None:  # an option to run (debug) a single test
-            return [self.test_file]
+        all_test_files: List[str] = []
+        all_children_of_tests_dir = os.listdir(self.tests_dir)
+        all_children_of_tests_dir.sort()
+        for f in all_children_of_tests_dir:
+            if f.endswith(".tolk"):
+                all_test_files.append(os.path.join(self.tests_dir, f))
+        for f in all_children_of_tests_dir:
+            if not f.endswith(".tolk") and f != "imports":
+                subdir = os.path.join(self.tests_dir, f)
+                children_of_subdir = os.listdir(subdir)
+                children_of_subdir.sort()
+                all_test_files += [os.path.join(subdir, f) for f in children_of_subdir]
 
-        tests = [f for f in os.listdir(self.tests_dir) if f.endswith(".tolk") or f.endswith(".ton")]
-        tests.sort()
-        return [os.path.join(self.tests_dir, f) for f in tests]
+        if self.file_pattern is not None:
+            all_test_files = [f for f in all_test_files if f.find(self.file_pattern) != -1]
+        return all_test_files
 
 
 class ParseInputError(Exception):
@@ -101,6 +107,7 @@ class TolkTestCaseInputOutput:
     """
     reJustNumber = re.compile(r"[-+]?\d+")
     reMathExpr = re.compile(r"[0x123456789()+\-*/<>]+")
+    reGasUsed = re.compile(r"gas:\sused=(\d+)")
 
     def __init__(self, method_id_str: str, input_str: str, output_str: str):
         processed_inputs = []
@@ -109,6 +116,8 @@ class TolkTestCaseInputOutput:
                 continue
             elif in_arg.startswith("x{") or TolkTestCaseInputOutput.reJustNumber.fullmatch(in_arg):
                 processed_inputs.append(in_arg)
+            elif in_arg.startswith("cell{"):
+                processed_inputs.append("<b " + in_arg.replace("cell{", "x{") + " s, b>")
             elif TolkTestCaseInputOutput.reMathExpr.fullmatch(in_arg):
                 processed_inputs.append(str(eval(in_arg)))
             elif in_arg == "null":
@@ -120,9 +129,12 @@ class TolkTestCaseInputOutput:
         self.input = " ".join(processed_inputs)
         self.expected_output = output_str
 
-    def check(self, stdout_lines: List[str], line_idx: int):
-        if stdout_lines[line_idx] != self.expected_output:
-            raise CompareOutputError("error on case #%d (%d | %s): expected '%s', found '%s'" % (line_idx + 1, self.method_id, self.input, self.expected_output, stdout_lines[line_idx]), "\n".join(stdout_lines))
+    def check(self, stdout_lines: List[str], line_idx: int, pivot_typeid: int):
+        expected_str = self.expected_output
+        if expected_str.find("typeid") != -1:
+           expected_str = re.sub(r'typeid-(\d+)', lambda m: str(pivot_typeid + int(m.group(1))), expected_str)
+        if stdout_lines[line_idx] != expected_str:
+            raise CompareOutputError("error on case #%d (%d | %s):\n    expect: %s\n    actual: %s" % (line_idx + 1, self.method_id, self.input, expected_str, stdout_lines[line_idx]), "\n".join(stdout_lines))
 
 
 class TolkTestCaseStderr:
@@ -253,6 +265,8 @@ class TolkTestFile:
         self.fif_codegen: List[TolkTestCaseFifCodegen] = []
         self.expected_hash: TolkTestCaseExpectedHash | None = None
         self.experimental_options: str | None = None
+        self.enable_tolk_lines_comments = False
+        self.pivot_typeid = 128
 
     def parse_input_from_tolk_file(self):
         with open(self.tolk_filename, "r") as fd:
@@ -272,6 +286,8 @@ class TolkTestFile:
                 self.stderr_includes.append(TolkTestCaseStderr(self.parse_string_value(lines), False))
             elif line.startswith("@fif_codegen_avoid"):
                 self.fif_codegen.append(TolkTestCaseFifCodegen(self.parse_string_value(lines), True))
+            elif line.startswith("@fif_codegen_enable_comments"):
+                self.enable_tolk_lines_comments = True
             elif line.startswith("@fif_codegen"):
                 self.fif_codegen.append(TolkTestCaseFifCodegen(self.parse_string_value(lines), False))
             elif line.startswith("@code_hash"):
@@ -319,6 +335,8 @@ class TolkTestFile:
         cmd_args = [TOLK_EXECUTABLE, "-o", self.get_compiled_fif_filename()]
         if self.experimental_options:
             cmd_args = cmd_args + ["-x", self.experimental_options]
+        if not self.enable_tolk_lines_comments:
+            cmd_args = cmd_args + ["-L"]
         res = subprocess.run(cmd_args + [self.tolk_filename], capture_output=True, timeout=10)
         exit_code = res.returncode
         stderr = str(res.stderr, "utf-8")
@@ -327,10 +345,11 @@ class TolkTestFile:
         if exit_code == 0 and self.compilation_should_fail:
             raise TolkCompilationSucceededError("compilation succeeded, but it should have failed")
 
+        for should_include in self.stderr_includes: # @stderr is used to check errors and warnings
+            should_include.check(stderr)
+
         if exit_code != 0 and self.compilation_should_fail:
-            for should_include in self.stderr_includes:
-                should_include.check(stderr)
-            return
+            return 0
 
         if exit_code != 0 and not self.compilation_should_fail:
             raise TolkCompilationFailedError("tolk exit_code = %d" % exit_code, stderr)
@@ -349,6 +368,7 @@ class TolkTestFile:
         if exit_code != 0:
             raise FiftExecutionFailedError("fift exit_code = %d" % exit_code, stderr)
 
+        gas_used = sum(map(int, TolkTestCaseInputOutput.reGasUsed.findall(stderr)))
         stdout_lines = [x.strip() for x in stdout.split("\n")]
         stdout_lines = [x for x in stdout_lines if x != ""]
         fif_code_hash = None
@@ -360,7 +380,7 @@ class TolkTestFile:
             raise CompareOutputError("unexpected number of fift output: %d lines, but %d testcases" % (len(stdout_lines), len(self.input_output)), stdout)
 
         for i in range(len(stdout_lines)):
-            self.input_output[i].check(stdout_lines, i)
+            self.input_output[i].check(stdout_lines, i, self.pivot_typeid)
 
         if len(self.fif_codegen):
             with open(self.get_compiled_fif_filename()) as fd:
@@ -371,11 +391,14 @@ class TolkTestFile:
         if self.expected_hash is not None:
             self.expected_hash.check(fif_code_hash)
 
+        return gas_used
+
 
 def run_all_tests(tests: List[str]):
+    total_gas_used = 0
     for ti in range(len(tests)):
         tolk_filename = tests[ti]
-        print("Running test %d/%d: %s" % (ti + 1, len(tests), tolk_filename), file=sys.stderr)
+        print("Running test %d/%d: %s" % (ti + 1, len(tests), os.path.basename(tolk_filename)), file=sys.stderr)
 
         artifacts_folder = os.path.join(TMP_DIR, tolk_filename)
         testcase = TolkTestFile(tolk_filename, artifacts_folder)
@@ -383,13 +406,14 @@ def run_all_tests(tests: List[str]):
             if not os.path.exists(artifacts_folder):
                 os.makedirs(artifacts_folder)
             testcase.parse_input_from_tolk_file()
-            testcase.run_and_check()
+            gas_used = testcase.run_and_check()
             shutil.rmtree(artifacts_folder)
+            total_gas_used += gas_used
 
             if testcase.compilation_should_fail:
-                print("  OK, compilation failed as it should", file=sys.stderr)
+                print("  OK, stderr match", file=sys.stderr)
             else:
-                print("  OK, %d cases" % len(testcase.input_output), file=sys.stderr)
+                print("  OK, %d cases" % (len(testcase.input_output)), file=sys.stderr)
         except ParseInputError as e:
             print("  Error parsing input (cur line #%d):" % (testcase.line_idx + 1), e, file=sys.stderr)
             exit(2)
@@ -422,9 +446,10 @@ def run_all_tests(tests: List[str]):
             print("  Mismatch in code hash:", e, file=sys.stderr)
             print("  Was compiled to:", testcase.get_compiled_fif_filename(), file=sys.stderr)
             exit(2)
+    return total_gas_used
 
 
 tests = CmdLineOptions(sys.argv).find_tests()
 print("Found", len(tests), "tests", file=sys.stderr)
-run_all_tests(tests)
-print("Done, %d tests" % len(tests), file=sys.stderr)
+total_gas_used = run_all_tests(tests)
+print("Done, %d tests, gas %d" % (len(tests), total_gas_used), file=sys.stderr)

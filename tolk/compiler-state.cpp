@@ -27,12 +27,25 @@ void ExperimentalOption::mark_deprecated(const char* deprecated_from_v, const ch
   this->deprecated_reason = deprecated_reason;
 }
 
+std::string_view PersistentHeapAllocator::copy_string_to_persistent_memory(std::string_view str_in_tmp_memory) {
+  size_t len = str_in_tmp_memory.size();
+  char* allocated = new char[len];
+  memcpy(allocated, str_in_tmp_memory.data(), str_in_tmp_memory.size());
+  auto new_chunk = std::make_unique<ChunkInHeap>(allocated, std::move(head));
+  head = std::move(new_chunk);
+  return {head->allocated, len};
+}
+
+void PersistentHeapAllocator::clear() {
+  head = nullptr;
+}
+
 void CompilerSettings::enable_experimental_option(std::string_view name) {
   ExperimentalOption* to_enable = nullptr;
 
-  if (name == remove_unused_functions.name) {
-    to_enable = &remove_unused_functions;
-  }
+  // if (name == some_option.name) {
+    // to_enable = &some_option;
+  // }
 
   if (to_enable == nullptr) {
     std::cerr << "unknown experimental option: " << name << std::endl;
@@ -51,6 +64,30 @@ void CompilerSettings::parse_experimental_options_cmd_arg(const std::string& cmd
   while (std::getline(stream, token, ',')) {
     enable_experimental_option(token);
   }
+}
+
+const std::vector<FunctionPtr>& get_all_builtin_functions() {
+  return G.all_builtins;
+}
+
+const std::vector<FunctionPtr>& get_all_not_builtin_functions() {
+  return G.all_functions;
+}
+
+const std::vector<GlobalVarPtr>& get_all_declared_global_vars() {
+  return G.all_global_vars;
+}
+
+const std::vector<GlobalConstPtr>& get_all_declared_constants() {
+  return G.all_constants;
+}
+
+const std::vector<StructPtr>& get_all_declared_structs() {
+  return G.all_structs;
+}
+
+const std::vector<EnumDefPtr>& get_all_declared_enums() {
+  return G.all_enums;
 }
 
 } // namespace tolk

@@ -112,6 +112,7 @@ void ExtMessageQ::run_message(td::Ref<ExtMessage> message, td::actor::ActorId<to
           if (!acc.unpack(shard_acc, utime, special)) {
             promise.set_error(td::Status::Error(PSLICE() << "Failed to unpack account state"));
           } else {
+            acc.block_lt = lt;
             auto status = run_message_on_account(wc, &acc, utime, lt + 1, msg_root, std::move(config));
             if (status.is_ok()) {
               promise.set_value(std::move(message));
@@ -136,13 +137,12 @@ td::Status ExtMessageQ::run_message_on_account(ton::WorkchainId wc,
    td::BitArray<256> rand_seed_;
    block::ComputePhaseConfig compute_phase_cfg_;
    block::ActionPhaseConfig action_phase_cfg_;
+   block::SerializeConfig serialize_config_;
    td::RefInt256 masterchain_create_fee, basechain_create_fee;
 
-   auto fetch_res = block::FetchConfigParams::fetch_config_params(*config, &old_mparams,
-                                                                  &storage_prices_, &storage_phase_cfg_,
-                                                                  &rand_seed_, &compute_phase_cfg_,
-                                                                  &action_phase_cfg_, &masterchain_create_fee,
-                                                                  &basechain_create_fee, wc, utime);
+   auto fetch_res = block::FetchConfigParams::fetch_config_params(
+       *config, &old_mparams, &storage_prices_, &storage_phase_cfg_, &rand_seed_, &compute_phase_cfg_,
+       &action_phase_cfg_, &serialize_config_, &masterchain_create_fee, &basechain_create_fee, wc, utime);
    if(fetch_res.is_error()) {
      auto error = fetch_res.move_as_error();
      LOG(DEBUG) << "Cannot fetch config params: " << error.message();
@@ -152,10 +152,9 @@ td::Status ExtMessageQ::run_message_on_account(ton::WorkchainId wc,
    compute_phase_cfg_.with_vm_log = true;
    compute_phase_cfg_.stop_on_accept_message = true;
 
-   auto res = Collator::impl_create_ordinary_transaction(msg_root, acc, utime, lt,
-                                                    &storage_phase_cfg_, &compute_phase_cfg_,
-                                                    &action_phase_cfg_,
-                                                    true, lt);
+   auto res =
+       Collator::impl_create_ordinary_transaction(msg_root, acc, utime, lt, &storage_phase_cfg_, &compute_phase_cfg_,
+                                                  &action_phase_cfg_, &serialize_config_, true, lt);
    if(res.is_error()) {
      auto error = res.move_as_error();
      LOG(DEBUG) << "Cannot run message on account: " << error.message();

@@ -360,7 +360,6 @@ MsgProcessedUptoCollection::MsgProcessedUptoCollection(ton::ShardIdFull _owner, 
     z.shard = key.get_uint(64);
     z.mc_seqno = (unsigned)((key + 64).get_uint(32));
     z.last_inmsg_lt = value.write().fetch_ulong(64);
-    // std::cerr << "ProcessedUpto shard " << std::hex << z.shard << std::dec << std::endl;
     return value.write().fetch_bits_to(z.last_inmsg_hash) && z.shard && ton::shard_contains(owner.shard, z.shard);
   });
 }
@@ -677,10 +676,25 @@ bool ParamLimits::deserialize(vm::CellSlice& cs) {
 }
 
 bool BlockLimits::deserialize(vm::CellSlice& cs) {
-  return cs.fetch_ulong(8) == 0x5d     // block_limits#5d
-         && bytes.deserialize(cs)      // bytes:ParamLimits
-         && gas.deserialize(cs)        // gas:ParamLimits
-         && lt_delta.deserialize(cs);  // lt_delta:ParamLimits
+  auto tag = cs.fetch_ulong(8);
+  if (tag != 0x5d && tag != 0x5e) {
+    return false;
+  }
+  // block_limits#5d
+  // block_limits_v2#5e
+  bool ok = bytes.deserialize(cs)         // bytes:ParamLimits
+            && gas.deserialize(cs)        // gas:ParamLimits
+            && lt_delta.deserialize(cs);  // lt_delta:ParamLimits
+  if (!ok) {
+    return false;
+  }
+  if (tag == 0x5e) {
+    return collated_data.deserialize(cs) &&     // collated_data:ParamLimits
+           imported_msg_queue.deserialize(cs);  // imported_msg_queue:ImportedMsgQueueLimits
+  } else {
+    collated_data = bytes;
+    return true;
+  }
 }
 
 int ParamLimits::classify(td::uint64 value) const {
@@ -712,12 +726,19 @@ int BlockLimits::classify_lt(ton::LogicalTime lt) const {
   return lt_delta.classify(lt - start_lt);
 }
 
-int BlockLimits::classify(td::uint64 size, td::uint64 gas, ton::LogicalTime lt) const {
-  return std::max(std::max(classify_size(size), classify_gas(gas)), classify_lt(lt));
+int BlockLimits::classify_collated_data_size(td::uint64 size) const {
+  return collated_data.classify(size);
 }
 
-bool BlockLimits::fits(unsigned cls, td::uint64 size, td::uint64 gas_value, ton::LogicalTime lt) const {
-  return bytes.fits(cls, size) && gas.fits(cls, gas_value) && lt_delta.fits(cls, lt - start_lt);
+int BlockLimits::classify(td::uint64 size, td::uint64 gas, ton::LogicalTime lt, td::uint64 collated_size) const {
+  return std::max(
+      {classify_size(size), classify_gas(gas), classify_lt(lt), classify_collated_data_size(collated_size)});
+}
+
+bool BlockLimits::fits(unsigned cls, td::uint64 size, td::uint64 gas_value, ton::LogicalTime lt,
+                       td::uint64 collated_size) const {
+  return bytes.fits(cls, size) && gas.fits(cls, gas_value) && lt_delta.fits(cls, lt - start_lt) &&
+         collated_data.fits(cls, collated_size);
 }
 
 td::uint64 BlockLimitStatus::estimate_block_size(const vm::NewCellStorageStat::Stat* extra) const {
@@ -730,20 +751,30 @@ td::uint64 BlockLimitStatus::estimate_block_size(const vm::NewCellStorageStat::S
 }
 
 int BlockLimitStatus::classify() const {
-  return limits.classify(estimate_block_size(), gas_used, cur_lt);
+  return limits.classify(estimate_block_size(), gas_used, cur_lt, collated_data_size_estimate);
 }
 
 bool BlockLimitStatus::fits(unsigned cls) const {
   return cls >= ParamLimits::limits_cnt ||
          (limits.gas.fits(cls, gas_used) && limits.lt_delta.fits(cls, cur_lt - limits.start_lt) &&
-          limits.bytes.fits(cls, estimate_block_size()));
+          limits.bytes.fits(cls, estimate_block_size()) && limits.collated_data.fits(cls, collated_data_size_estimate));
 }
 
 bool BlockLimitStatus::would_fit(unsigned cls, ton::LogicalTime end_lt, td::uint64 more_gas,
                                  const vm::NewCellStorageStat::Stat* extra) const {
   return cls >= ParamLimits::limits_cnt || (limits.gas.fits(cls, gas_used + more_gas) &&
                                             limits.lt_delta.fits(cls, std::max(cur_lt, end_lt) - limits.start_lt) &&
-                                            limits.bytes.fits(cls, estimate_block_size(extra)));
+                                            limits.bytes.fits(cls, estimate_block_size(extra)) &&
+                                            limits.collated_data.fits(cls, collated_data_size_estimate));
+}
+
+double BlockLimitStatus::load_fraction(unsigned cls) const {
+  if (cls >= ParamLimits::limits_cnt) {
+    return 0.0;
+  }
+  return std::max({(double)estimate_block_size() / (double)limits.bytes.limit(cls),
+                   (double)gas_used / (double)limits.gas.limit(cls),
+                   (double)collated_data_size_estimate / (double)limits.collated_data.limit(cls)});
 }
 
 // SETS: account_dict, shard_libraries_, mc_state_extra
@@ -862,8 +893,10 @@ td::Status ShardState::unpack_out_msg_queue_info(Ref<vm::Cell> out_msg_queue_inf
   out_msg_queue_ =
       std::make_unique<vm::AugmentedDictionary>(std::move(qinfo.out_queue), 352, block::tlb::aug_OutMsgQueue);
   if (verbosity >= 3 * 1) {
-    LOG(DEBUG) << "unpacking ProcessedUpto of our previous block " << id_.to_str();
-    block::gen::t_ProcessedInfo.print(std::cerr, qinfo.proc_info);
+    FLOG(DEBUG) {
+      sb << "unpacking ProcessedUpto of our previous block " << id_.to_str();
+      block::gen::t_ProcessedInfo.print(sb, qinfo.proc_info);
+    };
   }
   if (!block::gen::t_ProcessedInfo.validate_csr(1024, qinfo.proc_info)) {
     return td::Status::Error(
@@ -1317,6 +1350,65 @@ CurrencyCollection CurrencyCollection::operator-(td::RefInt256 other_grams) cons
   } else {
     return {};
   }
+}
+
+bool CurrencyCollection::clamp(const CurrencyCollection& other) {
+  if (!is_valid() || !other.is_valid()) {
+    return invalidate();
+  }
+  grams = std::min(grams, other.grams);
+  vm::Dictionary dict1{extra, 32}, dict2(other.extra, 32);
+  bool ok = dict1.check_for_each([&](td::Ref<vm::CellSlice> cs1, td::ConstBitPtr key, int n) {
+    CHECK(n == 32);
+    td::Ref<vm::CellSlice> cs2 = dict2.lookup(key, 32);
+    td::RefInt256 val1 = tlb::t_VarUIntegerPos_32.as_integer(cs1);
+    if (val1.is_null()) {
+      return false;
+    }
+    td::RefInt256 val2 = cs2.is_null() ? td::zero_refint() : tlb::t_VarUIntegerPos_32.as_integer(cs2);
+    if (val2.is_null()) {
+      return false;
+    }
+    if (val1 > val2) {
+      if (val2->sgn() == 0) {
+        dict1.lookup_delete(key, 32);
+      } else {
+        dict1.set(key, 32, cs2);
+      }
+    }
+    return true;
+  });
+  extra = dict1.get_root_cell();
+  return ok || invalidate();
+}
+
+bool CurrencyCollection::check_extra_currency_limit(td::uint32 max_currencies) const {
+  td::uint32 count = 0;
+  return vm::Dictionary{extra, 32}.check_for_each([&](td::Ref<vm::CellSlice>, td::ConstBitPtr, int) {
+    ++count;
+    return count <= max_currencies;
+  });
+}
+
+bool CurrencyCollection::remove_zero_extra_currencies(Ref<vm::Cell>& root, td::uint32 max_currencies) {
+  td::uint32 count = 0;
+  vm::Dictionary dict{root, 32};
+  int res = dict.filter([&](const vm::CellSlice& cs, td::ConstBitPtr, int) -> int {
+    ++count;
+    if (count > max_currencies) {
+      return -1;
+    }
+    td::RefInt256 val = tlb::t_VarUInteger_32.as_integer(cs);
+    if (val.is_null()) {
+      return -1;
+    }
+    return val->sgn() > 0;
+  });
+  if (res < 0) {
+    return false;
+  }
+  root = dict.get_root_cell();
+  return true;
 }
 
 bool CurrencyCollection::operator==(const CurrencyCollection& other) const {

@@ -187,7 +187,7 @@ const char *transaction_emulator_emulate_transaction(void *transaction_emulator,
                                           external_not_accepted->elapsed_time);
   }
 
-  auto emulation_success = dynamic_cast<emulator::TransactionEmulator::EmulationSuccess&>(*emulation_result);
+  auto emulation_success = std::move(dynamic_cast<emulator::TransactionEmulator::EmulationSuccess&>(*emulation_result));
   auto trans_boc_b64 = cell_to_boc_b64(std::move(emulation_success.transaction));
   if (trans_boc_b64.is_error()) {
     ERROR_RESPONSE(PSTRING() << "Can't serialize Transaction to boc " << trans_boc_b64.move_as_error());
@@ -260,7 +260,8 @@ const char *transaction_emulator_emulate_tick_tock_transaction(void *transaction
   }
   auto emulation_result = result.move_as_ok();
 
-  auto emulation_success = dynamic_cast<emulator::TransactionEmulator::EmulationSuccess&>(*emulation_result);
+  auto emulation_success =
+      std::move(dynamic_cast<emulator::TransactionEmulator::EmulationSuccess &>(*emulation_result));
   auto trans_boc_b64 = cell_to_boc_b64(std::move(emulation_success.transaction));
   if (trans_boc_b64.is_error()) {
     ERROR_RESPONSE(PSTRING() << "Can't serialize Transaction to boc " << trans_boc_b64.move_as_error());
@@ -496,6 +497,59 @@ bool tvm_emulator_set_c7(void *tvm_emulator, const char *address, uint32_t unixt
   return true;
 }
 
+bool tvm_emulator_set_extra_currencies(void *tvm_emulator, const char *extra_currencies) {
+  auto emulator = static_cast<emulator::TvmEmulator *>(tvm_emulator);
+  vm::Dictionary dict{32};
+  td::Slice extra_currencies_str{extra_currencies};
+  while (true) {
+    auto next_space_pos = extra_currencies_str.find(' ');
+    auto currency_id_amount = next_space_pos == td::Slice::npos ? 
+      extra_currencies_str.substr(0) : extra_currencies_str.substr(0, next_space_pos);
+
+    if (!currency_id_amount.empty()) {
+      auto delim_pos = currency_id_amount.find('=');
+      if (delim_pos == td::Slice::npos) {
+        LOG(ERROR) << "Invalid extra currency format, missing '='";
+        return false;
+      }
+
+      auto currency_id_str = currency_id_amount.substr(0, delim_pos);
+      auto amount_str = currency_id_amount.substr(delim_pos + 1);
+
+      auto currency_id = td::to_integer_safe<uint32_t>(currency_id_str);
+      if (currency_id.is_error()) {
+        LOG(ERROR) << "Invalid extra currency id: " << currency_id_str;
+        return false;
+      }
+      auto amount = td::dec_string_to_int256(amount_str);
+      if (amount.is_null()) {
+        LOG(ERROR) << "Invalid extra currency amount: " << amount_str;
+        return false;
+      }
+      if (amount == 0) {
+        continue;
+      }
+      if (amount < 0) {
+        LOG(ERROR) << "Negative extra currency amount: " << amount_str;
+        return false;
+      }
+
+      vm::CellBuilder cb;
+      block::tlb::t_VarUInteger_32.store_integer_value(cb, *amount);
+      if (!dict.set_builder(td::BitArray<32>(currency_id.ok()), cb, vm::DictionaryBase::SetMode::Add)) {
+        LOG(ERROR) << "Duplicate extra currency id";
+        return false;
+      }
+    }
+    if (next_space_pos == td::Slice::npos) {
+      break;
+    }
+    extra_currencies_str.remove_prefix(next_space_pos + 1);
+  }
+  emulator->set_extra_currencies(std::move(dict).extract_root_cell());
+  return true;
+}
+
 bool tvm_emulator_set_config_object(void* tvm_emulator, void* config) {
   auto emulator = static_cast<emulator::TvmEmulator *>(tvm_emulator);
   auto global_config = std::shared_ptr<block::Config>(static_cast<block::Config *>(config), config_deleter);
@@ -585,10 +639,16 @@ const char *tvm_emulator_run_get_method(void *tvm_emulator, int method_id, const
   return strdup(jb.string_builder().as_cslice().c_str());
 }
 
-const char *tvm_emulator_emulate_run_method(uint32_t len, const char *params_boc, int64_t gas_limit) {
+struct TvmEulatorEmulateRunMethodResponse
+{
+  const char *response;
+  const char *log;
+};
+
+TvmEulatorEmulateRunMethodResponse emulate_run_method(uint32_t len, const char *params_boc, int64_t gas_limit) {
   auto params_cell = vm::std_boc_deserialize(td::Slice(params_boc, len));
   if (params_cell.is_error()) {
-    return nullptr;
+    return { nullptr, nullptr };
   }
   auto params_cs = vm::load_cell_slice(params_cell.move_as_ok());
   auto code = params_cs.fetch_ref();
@@ -603,19 +663,19 @@ const char *tvm_emulator_emulate_run_method(uint32_t len, const char *params_boc
 
   td::Ref<vm::Stack> stack;
   if (!vm::Stack::deserialize_to(stack_cs, stack)) {
-    return nullptr;
+    return { nullptr, nullptr };
   }
 
   td::Ref<vm::Stack> c7;
   if (!vm::Stack::deserialize_to(c7_cs, c7)) {
-    return nullptr;
+    return { nullptr, nullptr };
   }
 
   auto emulator = new emulator::TvmEmulator(code, data);
   emulator->set_vm_verbosity_level(0);
   emulator->set_gas_limit(gas_limit);
   emulator->set_c7_raw(c7->fetch(0).as_tuple());
-  if (libs.is_empty()) {
+  if (!libs.is_empty()) {
     emulator->set_libraries(std::move(libs));
   }
   auto result = emulator->run_get_method(int(method_id), stack);
@@ -623,7 +683,7 @@ const char *tvm_emulator_emulate_run_method(uint32_t len, const char *params_boc
 
   vm::CellBuilder stack_cb;
   if (!result.stack->serialize(stack_cb)) {
-    return nullptr;
+    return { nullptr, nullptr };
   }
 
   vm::CellBuilder cb;
@@ -633,7 +693,7 @@ const char *tvm_emulator_emulate_run_method(uint32_t len, const char *params_boc
 
   auto ser = vm::std_boc_serialize(cb.finalize());
   if (!ser.is_ok()) {
-    return nullptr;
+    return { nullptr, nullptr };
   }
   auto sok = ser.move_as_ok();
 
@@ -642,7 +702,24 @@ const char *tvm_emulator_emulate_run_method(uint32_t len, const char *params_boc
   memcpy(rn, &sz, 4);
   memcpy(rn+4, sok.data(), sz);
 
-  return rn;
+  return { rn, strdup(result.vm_log.data()) };
+}
+
+const char *tvm_emulator_emulate_run_method(uint32_t len, const char *params_boc, int64_t gas_limit) {
+  auto result = emulate_run_method(len, params_boc, gas_limit);
+  return result.response;
+}
+
+void *tvm_emulator_emulate_run_method_detailed(uint32_t len, const char *params_boc, int64_t gas_limit) {
+  auto result = emulate_run_method(len, params_boc, gas_limit);
+  return new TvmEulatorEmulateRunMethodResponse(result);
+}
+
+void run_method_detailed_result_destroy(void *detailed_result) {
+  auto result = static_cast<TvmEulatorEmulateRunMethodResponse *>(detailed_result);
+  free(const_cast<char*>(result->response));
+  free(const_cast<char*>(result->log));
+  delete result;
 }
 
 const char *tvm_emulator_send_external_message(void *tvm_emulator, const char *message_body_boc) {
@@ -717,6 +794,12 @@ void tvm_emulator_destroy(void *tvm_emulator) {
 
 void emulator_config_destroy(void *config) {
   delete static_cast<block::Config *>(config);
+}
+
+void string_destroy(const char *str) {
+  if (str != nullptr) {
+    free(const_cast<char *>(str));
+  }
 }
 
 const char* emulator_version() {

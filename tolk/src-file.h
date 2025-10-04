@@ -18,10 +18,9 @@
 
 #include <string>
 #include <vector>
+#include "fwd-declarations.h"
 
 namespace tolk {
-
-struct ASTNodeBase;
 
 struct SrcFile {
   struct SrcPosition {
@@ -31,30 +30,31 @@ struct SrcFile {
     std::string_view line_str;
   };
 
-  struct ImportStatement {
+  struct ImportDirective {
     const SrcFile* imported_file;
   };
 
   int file_id;                          // an incremental counter through all parsed files
-  std::string rel_filename;             // relative to cwd
-  std::string abs_filename;             // absolute from root
+  bool is_stdlib_file;                  // is a part of Tolk distribution, imported via "@stdlib/..."
+  std::string realpath;                 // what "realpath" returned to locate (either abs path or what tolk-js returns)
   std::string text;                     // file contents loaded into memory, every Token::str_val points inside it
-  const ASTNodeBase* ast = nullptr;     // when a file has been parsed, its ast_tolk_file is kept here
-  std::vector<ImportStatement> imports; // to check strictness (can't use a symbol without importing its file)
+  AnyV ast = nullptr;                   // when a file has been parsed, its ast_tolk_file is kept here
+  std::vector<ImportDirective> imports; // to check strictness (can't use a symbol without importing its file)
 
-  SrcFile(int file_id, std::string rel_filename, std::string abs_filename, std::string&& text)
+  SrcFile(int file_id, bool is_stdlib_file, std::string realpath, std::string&& text)
     : file_id(file_id)
-    , rel_filename(std::move(rel_filename))
-    , abs_filename(std::move(abs_filename))
+    , is_stdlib_file(is_stdlib_file)
+    , realpath(std::move(realpath))
     , text(std::move(text)) { }
 
   SrcFile(const SrcFile& other) = delete;
   SrcFile &operator=(const SrcFile&) = delete;
 
-  bool is_stdlib_file() const;
-
   bool is_offset_valid(int offset) const;
   SrcPosition convert_offset(int offset) const;
+
+  std::string extract_short_name() const;
+  std::string extract_dirname() const;
 };
 
 
@@ -86,6 +86,7 @@ public:
 
   void show(std::ostream& os) const;
   void show_context(std::ostream& os) const;
+  void show_line_to_fif_output(std::ostream& os, int indent, int* last_line_no) const;
   std::string to_string() const;
 
   void show_general_error(std::ostream& os, const std::string& message, const std::string& err_type) const;
@@ -96,21 +97,19 @@ public:
 
 std::ostream& operator<<(std::ostream& os, SrcLocation loc);
 
-using AllSrcFiles = std::vector<const SrcFile*>;
-
 class AllRegisteredSrcFiles {
-  std::vector<SrcFile*> all_src_files;
-  int last_registered_file_id = -1;
+  std::vector<const SrcFile*> all_src_files;
   int last_parsed_file_id = -1;
 
 public:
-  SrcFile *find_file(int file_id) const;
-  SrcFile* find_file(const std::string& abs_filename) const;
+  const SrcFile* get_file(int file_id) const { return all_src_files.at(file_id); }
+  const SrcFile* find_file(const std::string& realpath) const;
 
-  SrcFile* locate_and_register_source_file(const std::string& rel_filename, SrcLocation included_from);
+  const SrcFile* locate_and_register_source_file(const std::string& filename, SrcLocation included_from);
   SrcFile* get_next_unparsed_file();
 
-  AllSrcFiles get_all_files() const;
+  auto begin() const { return all_src_files.begin(); }
+  auto end() const { return all_src_files.end(); }
 };
 
 struct Fatal final : std::exception {
@@ -126,10 +125,14 @@ struct Fatal final : std::exception {
 std::ostream& operator<<(std::ostream& os, const Fatal& fatal);
 
 struct ParseError : std::exception {
-  SrcLocation where;
+  FunctionPtr current_function;
+  SrcLocation loc;
   std::string message;
-  ParseError(SrcLocation _where, std::string _msg) : where(_where), message(std::move(_msg)) {
-  }
+
+  ParseError(SrcLocation loc, std::string message)
+    : current_function(nullptr), loc(loc), message(std::move(message)) {}
+  ParseError(FunctionPtr current_function, SrcLocation loc, std::string message)
+    : current_function(current_function), loc(loc), message(std::move(message)) {}
 
   const char* what() const noexcept override {
     return message.c_str();

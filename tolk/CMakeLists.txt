@@ -1,5 +1,3 @@
-cmake_minimum_required(VERSION 3.5 FATAL_ERROR)
-
 set(TOLK_SOURCE
         src-file.cpp
         lexer.cpp
@@ -7,14 +5,38 @@ set(TOLK_SOURCE
         compiler-state.cpp
         ast.cpp
         ast-from-tokens.cpp
+        constant-evaluator.cpp
+		gen-entrypoints.cpp
+        pack-unpack-api.cpp
+        pack-unpack-serializers.cpp
+        send-message-api.cpp
+        maps-kv-api.cpp
         pipe-discover-parse-sources.cpp
         pipe-register-symbols.cpp
+        pipe-resolve-identifiers.cpp
+        pipe-resolve-types.cpp
+        pipe-calc-rvalue-lvalue.cpp
+        pipe-infer-types-and-calls.cpp
+        pipe-check-inferred-types.cpp
+        pipe-refine-lvalue-for-mutate.cpp
+        pipe-check-rvalue-lvalue.cpp
+        pipe-check-private-fields.cpp
+        pipe-check-pure-impure.cpp
+        pipe-constant-folding.cpp
+        pipe-optimize-boolean-expr.cpp
+        pipe-detect-inline-in-place.cpp
+        pipe-check-serialized-fields.cpp
+        pipe-lazy-load-insertions.cpp
+        pipe-transform-on-message.cpp
         pipe-ast-to-legacy.cpp
         pipe-find-unused-symbols.cpp
         pipe-generate-fif-output.cpp
-        unify-types.cpp
+        type-system.cpp
+        smart-casts-cfg.cpp
+        generics-helpers.cpp
+        lazy-helpers.cpp
+        overload-resolution.cpp
         abscode.cpp
-        gen-abscode.cpp
         analyzer.cpp
         asmops.cpp
         builtins.cpp

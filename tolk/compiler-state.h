@@ -19,6 +19,7 @@
 #include "src-file.h"
 #include "symtable.h"
 #include "td/utils/Status.h"
+#include <functional>
 #include <set>
 #include <string>
 
@@ -51,17 +52,38 @@ struct CompilerSettings {
   int verbosity = 0;
   int optimization_level = 2;
   bool stack_layout_comments = true;
+  bool tolk_src_as_line_comments = true;
 
   std::string output_filename;
   std::string boc_output_filename;
-  std::string stdlib_folder;    // a path to tolk-stdlib/; files imported via @stdlib/xxx are there
+  std::string stdlib_folder;    // path to tolk-stdlib/; note: from tolk-js it's empty! tolk-js reads files via js callback
 
   FsReadCallback read_callback;
 
-  ExperimentalOption remove_unused_functions{"remove-unused-functions"};
+  // ExperimentalOption some_option{"some-option"};
 
   void enable_experimental_option(std::string_view name);
   void parse_experimental_options_cmd_arg(const std::string& cmd_arg);
+};
+
+// AST nodes contain std::string_view referencing to contents of .tolk files (kept in memory after reading).
+// It's more than enough, except a situation when we create new AST nodes inside the compiler
+// and want some "persistent place" for std::string_view to point to.
+// This class copies strings to heap, so that they remain valid after closing scope.
+class PersistentHeapAllocator {
+  struct ChunkInHeap {
+    const char* allocated;
+    std::unique_ptr<ChunkInHeap> next;
+
+    ChunkInHeap(const char* allocated, std::unique_ptr<ChunkInHeap>&& next)
+      : allocated(allocated), next(std::move(next)) {}
+  };
+
+  std::unique_ptr<ChunkInHeap> head = nullptr;
+
+public:
+  std::string_view copy_string_to_persistent_memory(std::string_view str_in_tmp_memory);
+  void clear();
 };
 
 // CompilerState contains a mutable state that is changed while the compilation is going on.
@@ -71,14 +93,17 @@ struct CompilerSettings {
 struct CompilerState {
   CompilerSettings settings;
 
-  SymTable symbols;
-  int scope_level = 0;
-  SymDef* sym_def[SymTable::SIZE_PRIME + 1]{};
-  SymDef* global_sym_def[SymTable::SIZE_PRIME + 1]{};
-  std::vector<std::pair<int, SymDef>> symbol_stack;
-  std::vector<SrcLocation> scope_opened_at;
+  GlobalSymbolTable symtable;
+  PersistentHeapAllocator persistent_mem;
 
-  std::vector<SymDef*> all_code_functions, all_global_vars, all_get_methods, all_constants;
+  std::vector<FunctionPtr> all_builtins;        // all built-in functions
+  std::vector<FunctionPtr> all_functions;       // all user-defined (not built-in) global-scope functions, with generic instantiations
+  std::vector<FunctionPtr> all_methods;         // all user-defined and built-in extension methods for arbitrary types (receivers)
+  std::vector<FunctionPtr> all_contract_getters;
+  std::vector<GlobalVarPtr> all_global_vars;
+  std::vector<GlobalConstPtr> all_constants;
+  std::vector<StructPtr> all_structs;
+  std::vector<EnumDefPtr> all_enums;
   AllRegisteredSrcFiles all_src_files;
 
   bool is_verbosity(int gt_eq) const { return settings.verbosity >= gt_eq; }

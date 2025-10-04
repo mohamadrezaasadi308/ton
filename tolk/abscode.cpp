@@ -16,6 +16,7 @@
 */
 #include "tolk.h"
 #include "compiler-state.h"
+#include "type-system.h"
 
 namespace tolk {
 
@@ -25,43 +26,28 @@ namespace tolk {
  * 
  */
 
-TmpVar::TmpVar(var_idx_t _idx, TypeExpr* _type, sym_idx_t sym_idx, SrcLocation loc)
-    : v_type(_type), idx(_idx), sym_idx(sym_idx), coord(0), where(loc) {
-  if (!_type) {
-    v_type = TypeExpr::new_hole();
+void TmpVar::show_as_stack_comment(std::ostream& os) const {
+  if (!name.empty()) {
+    os << name;
+  } else {
+    os << '\'' << ir_idx;
   }
+#ifdef TOLK_DEBUG
+  // uncomment for detailed stack output, like `'15(binary-op) '16(glob-var)`
+  // if (desc) os << desc;
+#endif
 }
 
-void TmpVar::set_location(SrcLocation loc) {
-  where = loc;
-}
-
-void TmpVar::dump(std::ostream& os) const {
-  show(os);
-  os << " : " << v_type << " (width ";
-  v_type->show_width(os);
-  os << ")";
-  if (coord > 0) {
-    os << " = _" << (coord >> 8) << '.' << (coord & 255);
-  } else if (coord < 0) {
-    int n = (~coord >> 8), k = (~coord & 0xff);
-    if (k) {
-      os << " = (_" << n << ".._" << (n + k - 1) << ")";
-    } else {
-      os << " = ()";
-    }
+void TmpVar::show(std::ostream& os) const {
+  os << '\'' << ir_idx;   // vars are printed out as `'1 '2` (in stack comments, debug info, etc.)
+  if (!name.empty()) {
+    os << '_' << name;
   }
-  os << std::endl;
-}
-
-void TmpVar::show(std::ostream& os, int omit_idx) const {
-  if (!is_unnamed()) {
-    os << G.symbols.get_name(sym_idx);
-    if (omit_idx >= 2) {
-      return;
-    }
+#ifdef TOLK_DEBUG
+  if (desc) {
+    os << ' ' << desc;    // "origin" of implicitly created tmp var, like `'15 (binary-op) '16 (glob-var)`
   }
-  os << '_' << idx;
+#endif
 }
 
 std::ostream& operator<<(std::ostream& os, const TmpVar& var) {
@@ -72,9 +58,6 @@ std::ostream& operator<<(std::ostream& os, const TmpVar& var) {
 void VarDescr::show_value(std::ostream& os) const {
   if (val & _Int) {
     os << 'i';
-  }
-  if (val & _Const) {
-    os << 'c';
   }
   if (val & _Zero) {
     os << '0';
@@ -115,7 +98,7 @@ void VarDescr::show(std::ostream& os, const char* name) const {
   if (name) {
     os << name;
   }
-  os << '_' << idx;
+  os << '\'' << idx;
   show_value(os);
 }
 
@@ -128,7 +111,7 @@ void VarDescr::set_const(td::RefInt256 value) {
   if (!int_const->signed_fits_bits(257)) {
     int_const.write().invalidate();
   }
-  val = _Const | _Int;
+  val = _Int;
   int s = sgn(int_const);
   if (s < -1) {
     val |= _Nan | _NonZero;
@@ -144,45 +127,41 @@ void VarDescr::set_const(td::RefInt256 value) {
   }
 }
 
-void VarDescr::set_const(std::string value) {
-  str_const = value;
-  val = _Const;
-}
-
-void VarDescr::set_const_nan() {
-  set_const(td::make_refint());
+void VarDescr::set_const(const std::string&) {
+  int_const.clear();
+  val = 0;
 }
 
 void VarDescr::operator|=(const VarDescr& y) {
+  if (is_int_const()) {
+    bool y_same = y.is_int_const() && *int_const == *y.int_const;
+    if (!y_same) {
+      int_const.clear();
+    }
+  }
   val &= y.val;
-  if (is_int_const() && y.is_int_const() && cmp(int_const, y.int_const) != 0) {
-    val &= ~_Const;
-  }
-  if (!(val & _Const)) {
-    int_const.clear();
-  }
 }
 
 void VarDescr::operator&=(const VarDescr& y) {
-  val |= y.val;
-  if (y.int_const.not_null() && int_const.is_null()) {
+  if (y.is_int_const()) {
     int_const = y.int_const;
   }
+  val |= y.val;
 }
 
 void VarDescr::set_value(const VarDescr& y) {
-  val = y.val;
   int_const = y.int_const;
+  val = y.val;
 }
 
 void VarDescr::set_value(VarDescr&& y) {
-  val = y.val;
   int_const = std::move(y.int_const);
+  val = y.val;
 }
 
 void VarDescr::clear_value() {
-  val = 0;
   int_const.clear();
+  val = 0;
 }
 
 void VarDescrList::show(std::ostream& os) const {
@@ -194,47 +173,6 @@ void VarDescrList::show(std::ostream& os) const {
     os << ' ' << v;
   }
   os << " ]\n";
-}
-
-void Op::split_vars(const std::vector<TmpVar>& vars) {
-  split_var_list(left, vars);
-  split_var_list(right, vars);
-  for (auto& op : block0) {
-    op.split_vars(vars);
-  }
-  for (auto& op : block1) {
-    op.split_vars(vars);
-  }
-}
-
-void Op::split_var_list(std::vector<var_idx_t>& var_list, const std::vector<TmpVar>& vars) {
-  int new_size = 0, changes = 0;
-  for (var_idx_t v : var_list) {
-    int c = vars.at(v).coord;
-    if (c < 0) {
-      ++changes;
-      new_size += (~c & 0xff);
-    } else {
-      ++new_size;
-    }
-  }
-  if (!changes) {
-    return;
-  }
-  std::vector<var_idx_t> new_var_list;
-  new_var_list.reserve(new_size);
-  for (var_idx_t v : var_list) {
-    int c = vars.at(v).coord;
-    if (c < 0) {
-      int n = (~c >> 8), k = (~c & 0xff);
-      while (k-- > 0) {
-        new_var_list.push_back(n++);
-      }
-    } else {
-      new_var_list.push_back(v);
-    }
-  }
-  var_list = std::move(new_var_list);
 }
 
 void Op::show(std::ostream& os, const std::vector<TmpVar>& vars, std::string pfx, int mode) const {
@@ -264,16 +202,13 @@ void Op::show(std::ostream& os, const std::vector<TmpVar>& vars, std::string pfx
     dis += "<impure> ";
   }
   switch (cl) {
-    case _Undef:
-      os << pfx << dis << "???\n";
-      break;
     case _Nop:
       os << pfx << dis << "NOP\n";
       break;
     case _Call:
       os << pfx << dis << "CALL: ";
       show_var_list(os, left, vars);
-      os << " := " << (fun_ref ? fun_ref->name() : "(null)") << " ";
+      os << " := " << (f_sym ? f_sym->name : "(null)") << " ";
       if ((mode & 4) && args.size() == right.size()) {
         show_var_list(os, args, vars);
       } else {
@@ -332,11 +267,11 @@ void Op::show(std::ostream& os, const std::vector<TmpVar>& vars, std::string pfx
     case _GlobVar:
       os << pfx << dis << "GLOBVAR ";
       show_var_list(os, left, vars);
-      os << " := " << (fun_ref ? fun_ref->name() : "(null)") << std::endl;
+      os << " := " << (g_sym ? g_sym->name : "(null)") << std::endl;
       break;
     case _SetGlob:
       os << pfx << dis << "SETGLOB ";
-      os << (fun_ref ? fun_ref->name() : "(null)") << " := ";
+      os << (g_sym ? g_sym->name : "(null)") << " := ";
       show_var_list(os, right, vars);
       os << std::endl;
       break;
@@ -398,7 +333,7 @@ void Op::show_var_list(std::ostream& os, const std::vector<var_idx_t>& idx_list,
   } else {
     os << "(" << vars.at(idx_list[0]);
     for (std::size_t i = 1; i < idx_list.size(); i++) {
-      os << "," << vars.at(idx_list[i]);
+      os << ", " << vars.at(idx_list[i]);
     }
     os << ")";
   }
@@ -443,11 +378,12 @@ void CodeBlob::print(std::ostream& os, int flags) const {
   os << "CODE BLOB: " << var_cnt << " variables, " << in_var_cnt << " input\n";
   if ((flags & 8) != 0) {
     for (const auto& var : vars) {
-      var.dump(os);
-      if (var.where.is_defined() && (flags & 1) != 0) {
-        var.where.show(os);
+      var.show(os);
+      os << " : " << var.v_type << std::endl;
+      if (var.loc.is_defined() && (flags & 1) != 0) {
+        var.loc.show(os);
         os << " defined here:\n";
-        var.where.show_context(os);
+        var.loc.show_context(os);
       }
     }
   }
@@ -458,26 +394,57 @@ void CodeBlob::print(std::ostream& os, int flags) const {
   os << "-------- END ---------\n\n";
 }
 
-var_idx_t CodeBlob::create_var(TypeExpr* var_type, var_idx_t sym_idx, SrcLocation location) {
-  vars.emplace_back(var_cnt, var_type, sym_idx, location);
-  return var_cnt++;
+std::vector<var_idx_t> CodeBlob::create_var(TypePtr var_type, SrcLocation loc, std::string name) {
+  std::vector<var_idx_t> ir_idx;
+  int stack_w = var_type->get_width_on_stack();
+  ir_idx.reserve(stack_w);
+  if (const TypeDataStruct* t_struct = var_type->try_as<TypeDataStruct>()) {
+    for (int i = 0; i < t_struct->struct_ref->get_num_fields(); ++i) {
+      StructFieldPtr field_ref = t_struct->struct_ref->get_field(i);
+      std::string sub_name = name.empty() || t_struct->struct_ref->get_num_fields() == 1 ? name : name + "." + field_ref->name;
+      std::vector<var_idx_t> nested = create_var(field_ref->declared_type, loc, std::move(sub_name));
+      ir_idx.insert(ir_idx.end(), nested.begin(), nested.end());
+    }
+  } else if (const TypeDataTensor* t_tensor = var_type->try_as<TypeDataTensor>()) {
+    for (int i = 0; i < t_tensor->size(); ++i) {
+      std::string sub_name = name.empty() ? name : name + "." + std::to_string(i);
+      std::vector<var_idx_t> nested = create_var(t_tensor->items[i], loc, std::move(sub_name));
+      ir_idx.insert(ir_idx.end(), nested.begin(), nested.end());
+    }
+  } else if (const TypeDataAlias* t_alias = var_type->try_as<TypeDataAlias>()) {
+    ir_idx = create_var(t_alias->underlying_type, loc, std::move(name));
+  } else if (const TypeDataUnion* t_union = var_type->try_as<TypeDataUnion>(); t_union && stack_w != 1) {
+    std::string utag_name = name.empty() ? "'UTag" : name + ".UTag";
+    if (t_union->or_null) {   // in stack comments, `a:(int,int)?` will be "a.0 a.1 a.UTag"
+      ir_idx = create_var(t_union->or_null, loc, std::move(name));
+    } else {                  // in stack comments, `a:int|slice` will be "a.USlot1 a.UTag"
+      for (int i = 0; i < stack_w - 1; ++i) {
+        std::string slot_name = name.empty() ? "'USlot" + std::to_string(i + 1) : name + ".USlot" + std::to_string(i + 1);
+        ir_idx.emplace_back(create_var(TypeDataUnknown::create(), loc, std::move(slot_name))[0]);
+      }
+    }
+    ir_idx.emplace_back(create_var(TypeDataInt::create(), loc, std::move(utag_name))[0]);
+  } else if (var_type != TypeDataVoid::create() && var_type != TypeDataNever::create()) {
+#ifdef TOLK_DEBUG
+    tolk_assert(stack_w == 1);
+#endif
+    vars.emplace_back(var_cnt, var_type, std::move(name), loc);
+    ir_idx.emplace_back(var_cnt);
+    var_cnt++;
+  }
+  tolk_assert(static_cast<int>(ir_idx.size()) == stack_w);
+  return ir_idx;
 }
 
-bool CodeBlob::import_params(FormalArgList arg_list) {
-  if (var_cnt || in_var_cnt) {
-    return false;
-  }
-  std::vector<var_idx_t> list;
-  for (const auto& par : arg_list) {
-    TypeExpr* arg_type;
-    SymDef* arg_sym;
-    SrcLocation arg_loc;
-    std::tie(arg_type, arg_sym, arg_loc) = par;
-    list.push_back(create_var(arg_type, arg_sym ? arg_sym->sym_idx : 0, arg_loc));
-  }
-  emplace_back(loc, Op::_Import, list);
-  in_var_cnt = var_cnt;
-  return true;
+var_idx_t CodeBlob::create_int(SrcLocation loc, int64_t value, const char* desc) {
+  vars.emplace_back(var_cnt, TypeDataInt::create(), std::string{}, loc);
+#ifdef TOLK_DEBUG
+  vars.back().desc = desc;
+#endif
+  var_idx_t ir_int = var_cnt;
+  var_cnt++;
+  emplace_back(loc, Op::_IntConst, std::vector{ir_int}, td::make_refint(value));
+  return ir_int;
 }
 
 }  // namespace tolk
